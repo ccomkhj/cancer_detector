@@ -46,7 +46,7 @@ import pandas as pd
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools.dataset_2d5 import MRI25DDataset, collate_fn_with_none
+from tools.dataset.dataset_2d5 import MRI25DDataset, collate_fn_with_none
 
 
 class SegmentationInference:

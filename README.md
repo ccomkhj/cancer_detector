@@ -40,16 +40,36 @@ mri/
 │   ├── test.py                # Model evaluation
 │   ├── inference.py           # Run segmentation
 │   └── demo.py                # Full pipeline demo
-├── tools/                      # Data Processing Tools
-│   ├── convert_xlsx2parquet.py       # Excel → Parquet converter
-│   ├── merge_datasets.py             # Merge multi-source data
-│   ├── tcia_generator.py             # Generate TCIA manifests (by series)
-│   ├── generate_tcia_by_class.py     # Generate TCIA by sequence type
-│   ├── generate_tcia_by_study.py     # Generate TCIA by study (full download)
-│   ├── dicom_converter.py            # DICOM → PNG converter
-│   ├── process_overlay_aligned.py    # STL → PNG masks (DICOM-aligned)
-│   ├── visualize_overlay_masks.py    # Visualize masks on images
-│   └── dataset_2d5_multiclass.py     # Multi-class dataset loader
+├── tools/                      # Data Processing Tools (Organized by Category)
+│   ├── preprocessing/          # Data conversion and processing
+│   │   ├── convert_xlsx2parquet.py       # Excel → Parquet converter
+│   │   ├── merge_datasets.py             # Merge multi-source data
+│   │   ├── dicom_converter.py            # DICOM → PNG converter
+│   │   ├── process_overlay_aligned.py    # STL → PNG masks (DICOM-aligned)
+│   │   ├── visualize_overlay_masks.py    # Visualize masks on images
+│   │   └── README_OVERLAY_PROCESSING.md  # Preprocessing documentation
+│   ├── tcia/                   # TCIA manifest generation
+│   │   ├── tcia_generator.py             # Core manifest generator
+│   │   ├── generate_tcia_by_class.py     # By sequence type
+│   │   ├── generate_tcia_by_study.py     # By full study
+│   │   └── README_TCIA_GENERATOR.md      # TCIA documentation
+│   ├── dataset/                # PyTorch dataset loaders
+│   │   ├── dataset_2d5_multiclass.py     # Multi-class 2.5D dataset
+│   │   ├── dataset_2d5_with_seg.py       # 2.5D with segmentation
+│   │   ├── dataset_2d5.py                # Basic 2.5D dataset
+│   │   ├── transforms_2d5.py             # Data augmentation
+│   │   └── README_2D5_PIPELINE.md        # Dataset documentation
+│   ├── deployment/             # Cloud deployment utilities
+│   │   ├── data_backup.py                # Create data backup
+│   │   ├── data_restore.py               # Restore data backup
+│   │   └── README.md                     # Deployment documentation
+│   ├── validation/             # Testing and validation scripts
+│   │   ├── validate_2d5_setup.py         # Validate training setup
+│   │   ├── validate_all_masks.py         # Validate mask integrity
+│   │   ├── test_dataset_basic.py         # Test dataset loaders
+│   │   ├── analyze_data.py               # Data distribution analysis
+│   │   └── README.md                     # Validation documentation
+│   └── README.md               # Tools overview and quick reference
 ├── checkpoints/                # Trained models
 └── requirements.txt
 ```
@@ -81,6 +101,31 @@ Trains multi-class segmentation (Prostate + Target1 + Target2 together)
 
 ---
 
+## ☁️ Cloud Deployment
+
+Deploy training pipeline on cloud machines (AWS, GCP, Azure):
+
+```bash
+# 1. Local: Create data backup
+python tools/deployment/data_backup.py
+
+# 2. Cloud: Clone repo and setup
+git clone <repo-url> && cd <repo>
+conda create -n mri python=3.12 -y && conda activate mri
+pip install -r requirements.txt
+
+# 3. Transfer and restore data
+scp backup.zip user@cloud:/path/to/repo/
+python tools/deployment/data_restore.py backup.zip
+
+# 4. Start training
+python service/train.py --config config.yaml
+```
+
+📖 **See [docs/CLOUD_DEPLOYMENT.md](docs/CLOUD_DEPLOYMENT.md) for detailed guide**
+
+---
+
 ## 📋 Detailed Workflow
 
 ### Step 1: Convert Excel to Parquet
@@ -88,7 +133,7 @@ Trains multi-class segmentation (Prostate + Target1 + Target2 together)
 Convert raw Excel data with PIRADS scores into class-partitioned parquet files.
 
 ```bash
-python tools/convert_xlsx2parquet.py
+python tools/preprocessing/convert_xlsx2parquet.py
 ```
 
 **Input:** `data/raw/selected_patients_3.xlsx` - MRI image metadata (197 records)
@@ -108,7 +153,7 @@ python tools/convert_xlsx2parquet.py
 Enrich patient records by merging three data sources: image metadata, target lesions, and biopsy results.
 
 ```bash
-python tools/merge_datasets.py
+python tools/preprocessing/merge_datasets.py
 ```
 
 **Input Sources:**
@@ -136,13 +181,13 @@ Create `.tcia` manifest files for downloading DICOM data.
 
 **Option A: By Series (T2, ADC, CALC_BVAL separately)**
 ```bash
-python tools/generate_tcia_by_class.py
+python tools/tcia/generate_tcia_by_class.py
 ```
 **Output:** `data/tcia/{t2,ep2d_adc,ep2d_calc}/class{1-4}.tcia`
 
 **Option B: By Study (Download all sequences)**
 ```bash
-python tools/generate_tcia_by_study.py
+python tools/tcia/generate_tcia_by_study.py
 ```
 **Output:** `data/tcia/study/class{1-4}.tcia`
 
@@ -181,12 +226,12 @@ Convert DICOM series to per-slice PNG images.
 
 **Process All Classes (Recommended):**
 ```bash
-python tools/dicom_converter.py --all
+python tools/preprocessing/dicom_converter.py --all
 ```
 
 **Process Single Class:**
 ```bash
-python tools/dicom_converter.py --class 1
+python tools/preprocessing/dicom_converter.py --class 1
 ```
 
 **Output Structure:**
@@ -220,7 +265,7 @@ data/processed/
 Convert 3D Slicer STL mesh segmentations to aligned PNG masks.
 
 ```bash
-python tools/process_overlay_aligned.py
+python tools/preprocessing/process_overlay_aligned.py
 ```
 
 **Requirements:** Original DICOM files in `data/nbia/`
@@ -257,7 +302,7 @@ data/processed_seg/
 Create overlay visualizations to verify mask alignment.
 
 ```bash
-python tools/visualize_overlay_masks.py
+python tools/preprocessing/visualize_overlay_masks.py
 ```
 
 **Output:** `data/visualizations/class{N}/case_XXXX/slice_NNNN.png`
@@ -398,10 +443,28 @@ python service/train.py --config config.yaml --resume checkpoints/model_epoch_25
 
 ## 📚 Documentation
 
-- **`FINAL_TRAINING_SETUP.md`** - Complete training guide
-- **`MASK_DETECTION_SOLUTION.md`** - How masks are loaded
-- **`DICOM_ALIGNED_PROCESSING.md`** - Mask alignment details
-- **`service/README.md`** - Service layer documentation
+All documentation is organized in the [`docs/`](docs/) directory:
+
+### Essential Documentation
+- **[Quick Reference](docs/QUICK_REFERENCE.md)** - Essential commands and workflows
+- **[Cloud Deployment](docs/CLOUD_DEPLOYMENT.md)** - Deploy to AWS, GCP, Azure
+- **[Training Enhanced](docs/TRAINING_ENHANCED.md)** - Advanced training features
+- **[Backup & Restore](docs/BACKUP_RESTORE_GUIDE.md)** - Data backup system
+
+### Tool Documentation
+- **[Tools Overview](tools/README.md)** - All tools organized by category
+- **[Preprocessing](tools/preprocessing/)** - Data conversion tools
+- **[Dataset Loaders](tools/dataset/)** - PyTorch dataset implementations
+- **[Deployment](tools/deployment/)** - Cloud deployment utilities
+- **[Validation](tools/validation/)** - Testing and validation scripts
+
+### Technical Guides
+- **[Complete Training Guide](docs/guides/FINAL_TRAINING_SETUP.md)** - Step-by-step training
+- **[Mask Alignment](docs/guides/DICOM_ALIGNED_PROCESSING.md)** - How alignment works
+- **[Mask Detection](docs/guides/MASK_DETECTION_SOLUTION.md)** - Mask loading system
+- **[Experiment Tracking](service/README_AIM.md)** - Using Aim for MLOps
+
+**📖 See [docs/README.md](docs/README.md) for complete documentation index**
 
 ---
 

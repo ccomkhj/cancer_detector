@@ -1,2 +1,27 @@
 data/nbia/
 data/processed/
+data/overlay/
+data/processed_seg/
+data/visualizations/
+validation_results/
+tools/__pycache__/
+.aim/
+service/__pycache__/
+
+# User experiment configs (keep default configs)
+experiments/
+config_*.yaml
+!config.yaml
+!config_onecycle.yaml
+
+# Backup files
+*_backup_*.zip
+*_metadata.json
+backup*.zip
+docs/archive
+docs/guides
+checkpoints/
+*.zip
+
+service/*._metadata
+*.pyc

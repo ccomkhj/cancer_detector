@@ -49,7 +49,10 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import yaml
 
-from dataset_2d5_multiclass import MRI25DMultiClassDataset, create_multiclass_dataloader
+from tools.dataset.dataset_2d5_multiclass import (
+    MRI25DMultiClassDataset,
+    create_multiclass_dataloader,
+)
 from logger import ExperimentLogger, get_run_name
 
 
