@@ -34,8 +34,8 @@ Usage:
 import sys
 from pathlib import Path
 
-# Add tools directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
+# Add project root to path (so we can import tools package)
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import argparse
 import torch
@@ -86,7 +86,6 @@ def get_scheduler(optimizer, scheduler_type, total_epochs, steps_per_epoch, args
             mode="max",  # For Dice score (higher is better)
             factor=args.scheduler_factor,
             patience=args.scheduler_patience,
-            verbose=True,
             min_lr=1e-7,
         )
         return scheduler, "epoch"
@@ -432,16 +431,24 @@ def compute_dice_score(pred, target, threshold=0.5):
 
 
 def train_epoch(
-    model, dataloader, criterion, optimizer, device, scheduler=None, step_on="epoch"
+    model,
+    dataloader,
+    criterion,
+    optimizer,
+    device,
+    scheduler=None,
+    step_on="epoch",
+    logger=None,
+    epoch=0,
 ):
-    """Train for one epoch"""
+    """Train for one epoch with batch-level logging"""
     model.train()
     total_loss = 0
     total_dice = 0
     num_batches = 0
 
     pbar = tqdm(dataloader, desc="Training")
-    for images, masks in pbar:
+    for batch_idx, (images, masks) in enumerate(pbar):
         images = images.to(device)
         masks = masks.to(device)
 
@@ -475,14 +482,35 @@ def train_epoch(
             }
         )
 
+        # Log batch-level metrics
+        if logger is not None:
+            global_step = epoch * len(dataloader) + batch_idx
+            logger.log_metrics(
+                {
+                    "batch_loss": loss.item(),
+                    "batch_dice": dice,
+                    "learning_rate": current_lr,
+                },
+                step=global_step,
+                context="train_batch",
+            )
+
     avg_loss = total_loss / max(num_batches, 1)
     avg_dice = total_dice / max(num_batches, 1)
 
     return avg_loss, avg_dice
 
 
-def validate_epoch(model, dataloader, criterion, device, save_visualizations=False):
-    """Validate for one epoch"""
+def validate_epoch(
+    model,
+    dataloader,
+    criterion,
+    device,
+    save_visualizations=False,
+    logger=None,
+    epoch=0,
+):
+    """Validate for one epoch with batch-level logging"""
     model.eval()
     total_loss = 0
     total_dice = 0
@@ -508,6 +536,18 @@ def validate_epoch(model, dataloader, criterion, device, save_visualizations=Fal
             num_batches += 1
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}", "dice": f"{dice:.4f}"})
+
+            # Log batch-level metrics
+            if logger is not None:
+                global_step = epoch * len(dataloader) + batch_idx
+                logger.log_metrics(
+                    {
+                        "batch_loss": loss.item(),
+                        "batch_dice": dice,
+                    },
+                    step=global_step,
+                    context="val_batch",
+                )
 
             # Save first batch for visualization
             if save_visualizations and batch_idx == 0:
@@ -900,11 +940,19 @@ def main():
 
         # Train
         train_loss, train_dice = train_epoch(
-            model, train_loader, criterion, optimizer, device, scheduler, step_on
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            scheduler,
+            step_on,
+            logger=logger,
+            epoch=epoch,
         )
         print(f"Train - Loss: {train_loss:.4f}, Dice: {train_dice:.4f}")
 
-        # Log training metrics
+        # Log epoch-level training metrics
         logger.log_metrics(
             {"loss": train_loss, "dice": train_dice, "learning_rate": current_lr},
             step=epoch,
@@ -914,11 +962,17 @@ def main():
         # Validate
         should_visualize = (epoch + 1) % args.vis_every == 0 or epoch == start_epoch
         val_loss, val_dice, vis_data = validate_epoch(
-            model, val_loader, criterion, device, save_visualizations=should_visualize
+            model,
+            val_loader,
+            criterion,
+            device,
+            save_visualizations=should_visualize,
+            logger=logger,
+            epoch=epoch,
         )
         print(f"Val   - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}")
 
-        # Log validation metrics
+        # Log epoch-level validation metrics
         logger.log_metrics(
             {"loss": val_loss, "dice": val_dice},
             step=epoch,
