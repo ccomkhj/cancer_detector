@@ -45,14 +45,6 @@ python service/validate_data.py
 
 ### 3. Train Model
 ```bash
-# Train with masks from processed_seg/ (RECOMMENDED)
-python service/train_with_seg.py \
-    --manifest data/processed/class2/manifest.csv \
-    --mask_type prostate \
-    --batch_size 8 \
-    --epochs 50
-
-# Or use basic training (requires masks in manifest)
 python service/train.py \
     --manifest data/processed/class2/manifest.csv \
     --epochs 50
