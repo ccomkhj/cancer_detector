@@ -7,25 +7,28 @@ This training script trains on ALL masks simultaneously:
 - All masks from data/processed_seg/ (prostate, target1, target2)
 
 Output: Multi-class segmentation model
-  - Class 0: Prostate
-  - Class 1: Target1
-  - Class 2: Target2
+  - Class 0: Prostate (Red)
+  - Class 1: Target1 (Green)
+  - Class 2: Target2 (Blue)
+
+Features:
+  - Advanced learning rate schedulers (OneCycle, Cosine, ReduceLROnPlateau, etc.)
+  - Validation visualizations logged to Aim
+  - Comprehensive experiment tracking with Aim
+  - Checkpoint saving and resuming
 
 Usage:
-    # Train on all masks (prostate + target1 + target2)
-    python service/train.py --manifest data/processed/class2/manifest.csv
+    # Use config file (recommended)
+    python service/train.py --config config.yaml
+
+    # Override specific parameters
+    python service/train.py --config config.yaml --epochs 100 --batch_size 16
 
     # Continue from checkpoint
-    python service/train.py --manifest data/processed/class2/manifest.csv --resume checkpoints/model_epoch_10.pt
+    python service/train.py --config config.yaml --resume checkpoints/model_epoch_10.pt
 
-    # Advanced options with learning rate scheduler
-    python service/train.py --manifest data/processed/class2/manifest.csv --batch_size 16 --epochs 100 --scheduler onecycle
-
-    # Use cosine annealing with warm restarts
-    python service/train.py --manifest data/processed/class2/manifest.csv --scheduler cosine --scheduler_t0 10
-
-    # Use ReduceLROnPlateau (default)
-    python service/train.py --manifest data/processed/class2/manifest.csv --scheduler reduce_on_plateau --scheduler_patience 5
+    # Pure CLI (no config file)
+    python service/train.py --manifest data/processed/class2/manifest.csv --epochs 50 --scheduler onecycle
 """
 
 import sys
@@ -42,6 +45,9 @@ from torch.utils.data import DataLoader
 import numpy as np
 from datetime import datetime
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import yaml
 
 from dataset_2d5_multiclass import MRI25DMultiClassDataset, create_multiclass_dataloader
 from logger import ExperimentLogger, get_run_name
@@ -270,6 +276,121 @@ class SimpleUNet(nn.Module):
 
 
 # ===========================
+# Visualization
+# ===========================
+
+
+def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4):
+    """
+    Create visualization of predictions vs ground truth
+
+    Args:
+        images: (B, C, H, W) - input images
+        masks_gt: (B, 3, H, W) - ground truth masks
+        masks_pred: (B, 3, H, W) - predicted masks (after sigmoid)
+        num_samples: Number of samples to visualize
+
+    Returns:
+        Dictionary of matplotlib figures
+    """
+    batch_size = min(images.shape[0], num_samples)
+
+    # Class colors (RGB)
+    colors = {
+        0: [1.0, 0.0, 0.0],  # Prostate - Red
+        1: [0.0, 1.0, 0.0],  # Target1 - Green
+        2: [0.0, 0.0, 1.0],  # Target2 - Blue
+    }
+
+    class_names = ["Prostate", "Target1", "Target2"]
+
+    visualizations = {}
+
+    for idx in range(batch_size):
+        # Get middle slice from stack
+        img = images[idx, images.shape[1] // 2].cpu().numpy()
+        gt = masks_gt[idx].cpu().numpy()
+        pred = masks_pred[idx].cpu().numpy()
+
+        # Normalize image for display
+        img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+
+        # Create figure with 4 columns: Image, GT, Pred, Overlay
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+        # Row 1: Ground Truth
+        # Image
+        axes[0, 0].imshow(img, cmap="gray")
+        axes[0, 0].set_title("Input Image", fontsize=12, fontweight="bold")
+        axes[0, 0].axis("off")
+
+        # Ground truth overlay
+        axes[0, 1].imshow(img, cmap="gray")
+        gt_overlay = np.zeros((*img.shape, 3))
+        for c in range(3):
+            for channel in range(3):
+                gt_overlay[:, :, channel] += gt[c] * colors[c][channel]
+        axes[0, 1].imshow(gt_overlay, alpha=0.5)
+        axes[0, 1].set_title("Ground Truth", fontsize=12, fontweight="bold")
+        axes[0, 1].axis("off")
+
+        # Individual GT masks
+        axes[0, 2].imshow(img, cmap="gray")
+        axes[0, 2].set_title("GT Classes", fontsize=12, fontweight="bold")
+        for c in range(3):
+            if gt[c].max() > 0:
+                axes[0, 2].contour(
+                    gt[c], levels=[0.5], colors=[colors[c]], linewidths=2
+                )
+        axes[0, 2].axis("off")
+
+        # Row 2: Predictions
+        # Image (repeated for alignment)
+        axes[1, 0].imshow(img, cmap="gray")
+        axes[1, 0].set_title("Input Image", fontsize=12, fontweight="bold")
+        axes[1, 0].axis("off")
+
+        # Prediction overlay
+        axes[1, 1].imshow(img, cmap="gray")
+        pred_overlay = np.zeros((*img.shape, 3))
+        pred_binary = (pred > 0.5).astype(float)
+        for c in range(3):
+            for channel in range(3):
+                pred_overlay[:, :, channel] += pred_binary[c] * colors[c][channel]
+        axes[1, 1].imshow(pred_overlay, alpha=0.5)
+        axes[1, 1].set_title("Prediction", fontsize=12, fontweight="bold")
+        axes[1, 1].axis("off")
+
+        # Individual prediction masks
+        axes[1, 2].imshow(img, cmap="gray")
+        axes[1, 2].set_title("Pred Classes", fontsize=12, fontweight="bold")
+        for c in range(3):
+            if pred_binary[c].max() > 0:
+                axes[1, 2].contour(
+                    pred_binary[c], levels=[0.5], colors=[colors[c]], linewidths=2
+                )
+        axes[1, 2].axis("off")
+
+        # Add legend
+        legend_elements = [
+            mpatches.Patch(color=colors[i], label=class_names[i]) for i in range(3)
+        ]
+        fig.legend(
+            handles=legend_elements,
+            loc="lower center",
+            ncol=3,
+            fontsize=11,
+            frameon=True,
+        )
+
+        plt.tight_layout(rect=[0, 0.03, 1, 1])
+
+        visualizations[f"sample_{idx}"] = fig
+
+    return visualizations
+
+
+# ===========================
 # Metrics
 # ===========================
 
@@ -357,16 +478,21 @@ def train_epoch(
     return avg_loss, avg_dice
 
 
-def validate_epoch(model, dataloader, criterion, device):
+def validate_epoch(model, dataloader, criterion, device, save_visualizations=False):
     """Validate for one epoch"""
     model.eval()
     total_loss = 0
     total_dice = 0
     num_batches = 0
 
+    # Store first batch for visualization
+    vis_images = None
+    vis_masks_gt = None
+    vis_masks_pred = None
+
     with torch.no_grad():
         pbar = tqdm(dataloader, desc="Validation")
-        for images, masks in pbar:
+        for batch_idx, (images, masks) in enumerate(pbar):
             images = images.to(device)
             masks = masks.to(device)
 
@@ -380,25 +506,72 @@ def validate_epoch(model, dataloader, criterion, device):
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}", "dice": f"{dice:.4f}"})
 
+            # Save first batch for visualization
+            if save_visualizations and batch_idx == 0:
+                vis_images = images
+                vis_masks_gt = masks
+                vis_masks_pred = torch.sigmoid(outputs)
+
     avg_loss = total_loss / max(num_batches, 1)
     avg_dice = total_dice / max(num_batches, 1)
 
-    return avg_loss, avg_dice
+    return avg_loss, avg_dice, (vis_images, vis_masks_gt, vis_masks_pred)
 
 
 # ===========================
-# Main
+# Configuration
 # ===========================
 
 
-def main():
+def load_config(config_path):
+    """Load configuration from YAML file"""
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
+
+
+def merge_config_with_args(args):
+    """
+    Merge YAML config with command-line args.
+    CLI args take precedence over config file.
+    """
+    if args.config is None:
+        return args
+
+    print(f"\nLoading configuration from: {args.config}")
+    config = load_config(args.config)
+
+    # Get default values from parser
+    parser = create_argument_parser()
+    defaults = vars(parser.parse_args([]))
+
+    # Merge: config < defaults < CLI args
+    for key, value in config.items():
+        # Only use config value if CLI arg is at default value
+        if hasattr(args, key) and getattr(args, key) == defaults.get(key):
+            setattr(args, key, value)
+            print(f"  {key}: {value}")
+
+    print()
+    return args
+
+
+def create_argument_parser():
+    """Create argument parser (separated for config merging)"""
     parser = argparse.ArgumentParser(
         description="Train 2.5D multi-class segmentation model (prostate + target1 + target2)"
     )
 
+    # Config file
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to YAML config file (CLI args override config)",
+    )
+
     # Data arguments
     parser.add_argument(
-        "--manifest", type=str, required=True, help="Path to manifest CSV"
+        "--manifest", type=str, default=None, help="Path to manifest CSV"
     )
     parser.add_argument(
         "--stack_depth", type=int, default=5, help="Number of slices to stack"
@@ -508,8 +681,38 @@ def main():
     parser.add_argument(
         "--num_workers", type=int, default=4, help="Number of data loading workers"
     )
+    parser.add_argument(
+        "--vis_every",
+        type=int,
+        default=5,
+        help="Save validation visualizations every N epochs",
+    )
+    parser.add_argument(
+        "--num_vis_samples",
+        type=int,
+        default=4,
+        help="Number of validation samples to visualize",
+    )
 
+    return parser
+
+
+# ===========================
+# Main
+# ===========================
+
+
+def main():
+    # Parse arguments
+    parser = create_argument_parser()
     args = parser.parse_args()
+
+    # Merge with config file if provided
+    args = merge_config_with_args(args)
+
+    # Validate required arguments
+    if args.manifest is None:
+        parser.error("--manifest is required (either via CLI or config file)")
 
     # Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -706,7 +909,10 @@ def main():
         )
 
         # Validate
-        val_loss, val_dice = validate_epoch(model, val_loader, criterion, device)
+        should_visualize = (epoch + 1) % args.vis_every == 0 or epoch == start_epoch
+        val_loss, val_dice, vis_data = validate_epoch(
+            model, val_loader, criterion, device, save_visualizations=should_visualize
+        )
         print(f"Val   - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}")
 
         # Log validation metrics
@@ -715,6 +921,38 @@ def main():
             step=epoch,
             context="val",
         )
+
+        # Log visualizations if generated
+        if should_visualize and vis_data[0] is not None:
+            print("  Generating validation visualizations...")
+            try:
+                vis_images, vis_masks_gt, vis_masks_pred = vis_data
+                visualizations = create_prediction_visualization(
+                    vis_images,
+                    vis_masks_gt,
+                    vis_masks_pred,
+                    num_samples=args.num_vis_samples,
+                )
+
+                # Convert figures to images and log
+                for name, fig in visualizations.items():
+                    # Convert figure to numpy array
+                    fig.canvas.draw()
+                    img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                    img_array = img_array.reshape(
+                        fig.canvas.get_width_height()[::-1] + (3,)
+                    )
+
+                    logger.log_images(
+                        {name: img_array}, step=epoch, context="val_predictions"
+                    )
+
+                    # Close figure to free memory
+                    plt.close(fig)
+
+                print(f"  ✓ Logged {len(visualizations)} validation visualizations")
+            except Exception as e:
+                print(f"  ⚠️  Error creating visualizations: {e}")
 
         # Step scheduler if epoch-level
         if scheduler is not None and step_on == "epoch":

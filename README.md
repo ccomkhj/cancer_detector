@@ -71,6 +71,10 @@ Checks data integrity and creates visualizations with color-coded masks
 
 ### 3. Train Model
 ```bash
+# Option 1: Use config file (recommended)
+python service/train.py --config config.yaml
+
+# Option 2: CLI arguments
 python service/train.py --manifest data/processed/class2/manifest.csv --epochs 50
 ```
 Trains multi-class segmentation (Prostate + Target1 + Target2 together)
@@ -287,14 +291,20 @@ python service/validate_data.py
 
 **Train Multi-Class Model:**
 ```bash
+# Using config file (recommended)
+python service/train.py --config config.yaml
+
+# Or with CLI args
 python service/train.py \
     --manifest data/processed/class2/manifest.csv \
     --batch_size 8 \
-    --epochs 50
+    --epochs 50 \
+    --scheduler onecycle
 ```
 ✓ Trains on all 3 classes simultaneously  
+✓ Advanced LR schedulers + validation visualizations  
 ✓ Saves checkpoints to `checkpoints/`  
-✓ Auto-resizes images to 256×256
+✓ Logs to Aim for experiment tracking
 
 **Evaluate Model:**
 ```bash
@@ -366,20 +376,22 @@ Output: (batch, 3, 256, 256)   # 3 segmentation masks
 dataset = MRI25DMultiClassDataset(..., target_size=(512, 512))
 ```
 
-**Training Options:**
-```bash
-python service/train.py \
-    --manifest data/processed/class2/manifest.csv \
-    --batch_size 16 \
-    --epochs 100 \
-    --lr 5e-5 \
-    --stack_depth 7 \
-    --loss dice_bce
-```
+**Configuration Management:**
 
-**Resume Training:**
+All training parameters can be configured via YAML (see `config.yaml`):
+- Learning rate schedulers (OneCycle, Cosine, ReduceLROnPlateau, etc.)
+- Validation visualizations
+- Experiment tracking with Aim
+
 ```bash
-python service/train.py --manifest ... --resume checkpoints/model_epoch_25.pt
+# Edit config.yaml, then run:
+python service/train.py --config config.yaml
+
+# Override specific params:
+python service/train.py --config config.yaml --epochs 100 --batch_size 16
+
+# Resume training:
+python service/train.py --config config.yaml --resume checkpoints/model_epoch_25.pt
 ```
 
 ---
