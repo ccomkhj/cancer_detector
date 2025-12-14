@@ -13,7 +13,7 @@ tqdm>=4.67.0
 
 # 3D mesh processing
 trimesh>=4.0.0
-scipy>=1.16.3
+scipy
 
 # Visualization
 matplotlib>=3.7.0
@@ -27,3 +27,6 @@ PyYAML>=6.0.0
 torch>=2.0.0
 torchvision>=0.15.0
 aim>=3.17.0
+
+wandb
+weave

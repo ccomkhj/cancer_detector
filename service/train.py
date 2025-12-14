@@ -14,7 +14,7 @@ Output: Multi-class segmentation model
 Features:
   - Advanced learning rate schedulers (OneCycle, Cosine, ReduceLROnPlateau, etc.)
   - Validation visualizations logged to Aim
-  - Comprehensive experiment tracking with Aim
+  - Comprehensive experiment tracking with Aim and Weights & Biases (wandb)
   - Checkpoint saving and resuming
 
 Usage:
@@ -29,8 +29,17 @@ Usage:
 
     # Pure CLI (no config file)
     python service/train.py --manifest data/processed/class2/manifest.csv --epochs 50 --scheduler onecycle
+
+    # Enable wandb logging
+    python service/train.py --config config.yaml --wandb --wandb_project your_project_name
+
+Note:
+    For wandb, ensure WANDB_API_KEY is set:
+    export WANDB_API_KEY="<your_wandb_api_key>"
+    Find your key at: https://wandb.ai/authorize
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -38,22 +47,34 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import argparse
+from datetime import datetime
+
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
-import numpy as np
-from datetime import datetime
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import yaml
+from logger import ExperimentLogger, get_run_name
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from tools.dataset.dataset_2d5_multiclass import (
     MRI25DMultiClassDataset,
     create_multiclass_dataloader,
 )
-from logger import ExperimentLogger, get_run_name
+
+# Optional wandb/weave integration
+try:
+    import wandb
+    import weave
+
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
+    weave = None
 
 
 # ===========================
@@ -737,6 +758,31 @@ def create_argument_parser():
         help="Number of validation samples to visualize",
     )
 
+    # Wandb arguments
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Enable Weights & Biases (wandb) logging",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="mri-segmentation",
+        help="Wandb project name (format: entity/project or just project)",
+    )
+    parser.add_argument(
+        "--wandb_entity",
+        type=str,
+        default=None,
+        help="Wandb entity (username or team name)",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="Wandb run name (auto-generated if not provided)",
+    )
+
     return parser
 
 
@@ -886,49 +932,91 @@ def main():
         print(f"  Resumed from epoch {start_epoch}")
         print(f"  Best Dice so far: {best_dice:.4f}\n")
 
+    # Prepare hyperparameters dict (shared by Aim and wandb)
+    hyperparams = {
+        "manifest": str(args.manifest),
+        "stack_depth": args.stack_depth,
+        "batch_size": args.batch_size,
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "loss": args.loss,
+        "model": args.model,
+        "num_workers": args.num_workers,
+        "train_samples": len(train_dataset),
+        "val_samples": len(val_dataset),
+        "model_params": num_params,
+        "resumed_from": str(args.resume) if args.resume else None,
+        # Scheduler params
+        "scheduler": args.scheduler,
+        "scheduler_factor": (
+            args.scheduler_factor
+            if args.scheduler in ["reduce_on_plateau", "step", "exponential"]
+            else None
+        ),
+        "scheduler_patience": (
+            args.scheduler_patience if args.scheduler == "reduce_on_plateau" else None
+        ),
+        "scheduler_t0": args.scheduler_t0 if args.scheduler == "cosine" else None,
+        "scheduler_min_lr": (
+            args.scheduler_min_lr
+            if args.scheduler in ["cosine", "cosine_simple"]
+            else None
+        ),
+        "scheduler_max_lr_mult": (
+            args.scheduler_max_lr_mult if args.scheduler == "onecycle" else None
+        ),
+    }
+
     # Initialize Aim logger
     logger = ExperimentLogger(
         experiment_name="multiclass_segmentation",
-        hyperparams={
-            "manifest": str(args.manifest),
-            "stack_depth": args.stack_depth,
-            "batch_size": args.batch_size,
-            "epochs": args.epochs,
-            "lr": args.lr,
-            "loss": args.loss,
-            "model": args.model,
-            "num_workers": args.num_workers,
-            "train_samples": len(train_dataset),
-            "val_samples": len(val_dataset),
-            "model_params": num_params,
-            "resumed_from": str(args.resume) if args.resume else None,
-            # Scheduler params
-            "scheduler": args.scheduler,
-            "scheduler_factor": (
-                args.scheduler_factor
-                if args.scheduler in ["reduce_on_plateau", "step", "exponential"]
-                else None
-            ),
-            "scheduler_patience": (
-                args.scheduler_patience
-                if args.scheduler == "reduce_on_plateau"
-                else None
-            ),
-            "scheduler_t0": args.scheduler_t0 if args.scheduler == "cosine" else None,
-            "scheduler_min_lr": (
-                args.scheduler_min_lr
-                if args.scheduler in ["cosine", "cosine_simple"]
-                else None
-            ),
-            "scheduler_max_lr_mult": (
-                args.scheduler_max_lr_mult if args.scheduler == "onecycle" else None
-            ),
-        },
+        hyperparams=hyperparams,
         run_name=get_run_name(args),
     )
 
     # Log system info
     logger.log_system_info()
+
+    # Initialize wandb/weave if enabled
+    wandb_run = None
+    if args.wandb:
+        if not WANDB_AVAILABLE:
+            print(
+                "\n⚠️  wandb/weave not installed. Install with: pip install wandb weave"
+            )
+            print("   wandb logging will be disabled.\n")
+        elif not os.environ.get("WANDB_API_KEY"):
+            print("\n⚠️  WANDB_API_KEY not set.")
+            print("   Set it with: export WANDB_API_KEY='<your_key>'")
+            print("   Find your key at: https://wandb.ai/authorize")
+            print("   wandb logging will be disabled.\n")
+        else:
+            try:
+                # Initialize weave for tracking
+                weave_project = args.wandb_project
+                if args.wandb_entity:
+                    weave_project = f"{args.wandb_entity}/{args.wandb_project}"
+                weave.init(weave_project)
+
+                # Initialize wandb run
+                wandb_run_name = args.wandb_run_name or get_run_name(args)
+                wandb_run = wandb.init(
+                    project=args.wandb_project,
+                    entity=args.wandb_entity,
+                    name=wandb_run_name,
+                    config=hyperparams,
+                    reinit=True,
+                )
+
+                print(f"\n✓ Wandb/Weave logging initialized")
+                print(f"  Project: {weave_project}")
+                print(f"  Run: {wandb_run_name}")
+                print(f"  URL: {wandb_run.get_url()}")
+                print()
+            except Exception as e:
+                print(f"\n⚠️  Failed to initialize wandb: {e}")
+                print("   wandb logging will be disabled.\n")
+                wandb_run = None
 
     # Training loop
     print("Starting training...\n")
@@ -959,6 +1047,18 @@ def main():
             context="train",
         )
 
+        # Log to wandb
+        if wandb_run is not None:
+            wandb.log(
+                {
+                    "train/loss": train_loss,
+                    "train/dice": train_dice,
+                    "learning_rate": current_lr,
+                    "epoch": epoch,
+                },
+                step=epoch,
+            )
+
         # Validate
         should_visualize = (epoch + 1) % args.vis_every == 0 or epoch == start_epoch
         val_loss, val_dice, vis_data = validate_epoch(
@@ -979,6 +1079,16 @@ def main():
             context="val",
         )
 
+        # Log validation metrics to wandb
+        if wandb_run is not None:
+            wandb.log(
+                {
+                    "val/loss": val_loss,
+                    "val/dice": val_dice,
+                },
+                step=epoch,
+            )
+
         # Log visualizations if generated
         if should_visualize and vis_data[0] is not None:
             print("  Generating validation visualizations...")
@@ -992,6 +1102,7 @@ def main():
                 )
 
                 # Convert figures to images and log
+                wandb_images = {}
                 for name, fig in visualizations.items():
                     # Convert figure to numpy array
                     fig.canvas.draw()
@@ -1004,8 +1115,18 @@ def main():
                         {name: img_array}, step=epoch, context="val_predictions"
                     )
 
+                    # Store for wandb logging
+                    if wandb_run is not None:
+                        wandb_images[f"predictions/{name}"] = wandb.Image(
+                            img_array, caption=f"Epoch {epoch+1} - {name}"
+                        )
+
                     # Close figure to free memory
                     plt.close(fig)
+
+                # Log images to wandb
+                if wandb_run is not None and wandb_images:
+                    wandb.log(wandb_images, step=epoch)
 
                 print(f"  ✓ Logged {len(visualizations)} validation visualizations")
             except Exception as e:
@@ -1072,10 +1193,29 @@ def main():
                     {"val_loss": val_loss, "val_dice": val_dice}, epoch=epoch
                 )
 
+                # Log best metrics to wandb
+                if wandb_run is not None:
+                    wandb.run.summary["best_val_dice"] = val_dice
+                    wandb.run.summary["best_val_loss"] = val_loss
+                    wandb.run.summary["best_epoch"] = epoch + 1
+                    # Save model artifact to wandb
+                    artifact = wandb.Artifact(
+                        name=f"model-best",
+                        type="model",
+                        description=f"Best model at epoch {epoch+1} with val_dice={val_dice:.4f}",
+                    )
+                    artifact.add_file(str(best_path))
+                    wandb_run.log_artifact(artifact)
+
         print()
 
     # Close logger
     logger.close()
+
+    # Close wandb
+    if wandb_run is not None:
+        wandb.finish()
+        print("✓ Wandb logging closed")
 
     print(f"\n{'='*80}")
     print(f"Training Complete!")

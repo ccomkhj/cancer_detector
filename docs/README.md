@@ -11,6 +11,7 @@ Complete documentation for the MRI 2.5D Segmentation Pipeline.
 
 ### User Guides
 - **[Cloud Deployment](CLOUD_DEPLOYMENT.md)** - Deploy to AWS, GCP, Azure
+- **[SLURM Cluster](slurm.md)** - Submit training jobs on HPC
 - **[Training Enhanced](TRAINING_ENHANCED.md)** - Advanced training features
 - **[Backup & Restore](BACKUP_RESTORE_GUIDE.md)** - Data backup system
 
@@ -182,4 +183,3 @@ When adding new documentation:
 ---
 
 Need help? Check the [Quick Reference](QUICK_REFERENCE.md) or open an issue on GitHub.
-
