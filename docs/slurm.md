@@ -51,12 +51,43 @@ singularity build mri-train.sif docker-archive://mri-train-slurm.tar
 If you have Docker + Singularity/Apptainer available on the same machine, you can try:
 
 ```bash
-./scripts/build_singularity.sh
+bash ./scripts/build_singularity.sh
 ```
 
 It builds `mri-train.sif` in the project root.
 
+If your cluster does **not** have Docker (common), try the remote builder mode:
+
+```bash
+module load apptainer 2>/dev/null || true
+bash ./scripts/build_singularity.sh --remote
+```
+
+If you get a message like “not authorized to use apptainer” (or you’re not in a required *container* group), you have two options:
+
+- Request access from your cluster (often you must sign a container usage policy / be added to a `container` group).
+- Skip containers and run in **native Python mode** (see below).
+
 ## 3) Submit a training job
+
+### JUWELS (JSC) notes
+
+JUWELS uses SLURM and requires an **account/budget** for charging. You can pass these at submission time (no script edits needed):
+
+```bash
+sbatch --account=<BUDGET> --partition=<PARTITION> scripts/submit_slurm.sh
+```
+
+For GPU jobs, request GPUs via `--gres=gpu:<N>` and choose a GPU-capable partition for your module.
+
+Containers on JUWELS are run via **Apptainer** (Singularity-compatible), and access may require joining a `container` group via JuDoor/JUDOOR (you’ll see “not authorized to use apptainer” until enabled).
+
+If Apptainer pulls/builds fail due to cache/temp locations, set these to a writable directory (e.g. project scratch) before running Apptainer:
+
+```bash
+export APPTAINER_CACHEDIR=$(mktemp -d -p <WRITABLE_DIRECTORY>)
+export APPTAINER_TMPDIR=$(mktemp -d -p <WRITABLE_DIRECTORY>)
+```
 
 ### Container mode (default)
 
@@ -92,6 +123,16 @@ sbatch scripts/submit_slurm_wandb.sh
 USE_SINGULARITY=0 CONDA_ENV=mri sbatch scripts/submit_slurm.sh
 ```
 
+In native mode you must ensure dependencies exist on the cluster (via modules + conda/venv). A common pattern is:
+
+```bash
+module load cuda 2>/dev/null || true
+module load anaconda 2>/dev/null || true
+conda create -n mri python=3.10 -y
+conda activate mri
+pip install -r requirements.txt
+```
+
 ## 4) Monitor / debug
 
 ```bash
@@ -108,4 +149,3 @@ Edit the `#SBATCH` block at the top of `scripts/submit_slurm.sh`:
 - `--partition`, `--account` (often required)
 - `--time`, `--mem`, `--cpus-per-task`
 - `--gres=gpu:<N>` for GPUs
-

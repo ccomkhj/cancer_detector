@@ -20,11 +20,24 @@
 
 set -e
 
+if [[ -z "${BASH_VERSION:-}" ]]; then
+    exec bash "$0" "$@"
+fi
+
 # Configuration
 DOCKER_IMAGE_NAME="mri-train"
 DOCKER_IMAGE_TAG="latest"
 SINGULARITY_IMAGE="mri-train.sif"
 BUILD_REMOTE=0
+
+# Determine available container runtime command (singularity/apptainer)
+if command -v singularity &> /dev/null; then
+    SINGULARITY_CMD="singularity"
+elif command -v apptainer &> /dev/null; then
+    SINGULARITY_CMD="apptainer"
+else
+    SINGULARITY_CMD=""
+fi
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -59,18 +72,24 @@ echo ""
 
 # Method 1: Build Docker image first, then convert to Singularity
 if [[ ${BUILD_REMOTE} -eq 0 ]]; then
+    if ! command -v docker &> /dev/null; then
+        echo "WARNING: 'docker' not found. Switching to remote build mode."
+        echo "If your site disables remote builds, build the Docker image on a machine with Docker,"
+        echo "then transfer a tarball and run:"
+        echo "  ${SINGULARITY_CMD:-apptainer} build ${SINGULARITY_IMAGE} docker-archive://mri-train.tar"
+        echo ""
+        BUILD_REMOTE=1
+    fi
+fi
+
+if [[ ${BUILD_REMOTE} -eq 0 ]]; then
     echo "Step 1: Building Docker image..."
     docker build -t "${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}" .
     
     echo ""
     echo "Step 2: Converting to Singularity image..."
     
-    # Check if singularity or apptainer is available
-    if command -v singularity &> /dev/null; then
-        SINGULARITY_CMD="singularity"
-    elif command -v apptainer &> /dev/null; then
-        SINGULARITY_CMD="apptainer"
-    else
+    if [[ -z "${SINGULARITY_CMD}" ]]; then
         echo "ERROR: Neither singularity nor apptainer found."
         echo ""
         echo "Alternative: Save Docker image and convert on HPC cluster:"
@@ -93,6 +112,12 @@ if [[ ${BUILD_REMOTE} -eq 0 ]]; then
 else
     # Method 2: Build directly with Singularity from definition file
     echo "Building with Singularity remote builder..."
+    if [[ -z "${SINGULARITY_CMD}" ]]; then
+        echo "ERROR: Neither 'singularity' nor 'apptainer' found in PATH."
+        echo "Load the module provided by your cluster (e.g. 'module load apptainer') and re-run."
+        exit 1
+    fi
+    echo "Note: Some clusters restrict Apptainer/Singularity usage (e.g. require a 'container' group)."
     
     # Create temporary Singularity definition file
     cat > singularity.def << 'EOF'
@@ -129,7 +154,19 @@ From: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
     exec python service/train.py "$@"
 EOF
     
-    singularity build --remote "${SINGULARITY_IMAGE}" singularity.def
+    set +e
+    ${SINGULARITY_CMD} build --remote "${SINGULARITY_IMAGE}" singularity.def
+    BUILD_STATUS=$?
+    set -e
+    if [[ ${BUILD_STATUS} -ne 0 ]]; then
+        echo ""
+        echo "ERROR: Remote build failed."
+        echo "If you see an authorization/group error, request access from your cluster admins."
+        echo "Alternative options:"
+        echo "  - Build the .sif on another machine with apptainer/singularity, then copy it to the cluster"
+        echo "  - Run without containers: USE_SINGULARITY=0 sbatch scripts/submit_slurm.sh"
+        exit ${BUILD_STATUS}
+    fi
     rm -f singularity.def
 fi
 
@@ -144,5 +181,3 @@ echo ""
 echo "Submit job:"
 echo "  sbatch scripts/submit_slurm.sh"
 echo "============================================================================"
-
-
