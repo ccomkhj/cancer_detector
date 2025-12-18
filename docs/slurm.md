@@ -1,151 +1,151 @@
 # SLURM (HPC Cluster) Job Submission
 
-This repo includes SLURM submission scripts in `scripts/` and supports running training either:
+This repo includes SLURM submission scripts in `scripts/` that support running training in a **Singularity/Apptainer container** with automatic dependency installation.
 
-- **In a container** (recommended on HPC): Singularity/Apptainer `.sif`
-- **Natively** (no container): Conda/venv on the cluster
+## Prerequisites
 
-## 1) Prepare the project on the cluster
+### 1) Project Setup on Cluster
 
 1. Copy/clone this repo onto the cluster (preferably on a fast filesystem like `$SCRATCH`).
-2. Ensure your data is available under `data/` (or adjust bind mounts in the job script).
-3. Create output directories (if they don’t exist yet):
+2. Ensure your data is available under `data/` directory.
+3. Create output directories:
 
 ```bash
 mkdir -p checkpoints .aim logs
 ```
 
-## 2) Build a container image (optional, but recommended)
+### 2) Wandb Setup (Optional)
 
-Most clusters do **not** allow `docker run` on compute nodes. Typical workflow:
-
-1. Build a Docker image on your laptop/workstation
-2. Convert it to a Singularity/Apptainer `.sif`
-3. Submit with `sbatch`
-
-### Option A: Build Docker → Convert to `.sif`
-
-Build with the SLURM-friendly Dockerfile:
+Set your wandb API key using one of these methods:
 
 ```bash
-docker build -f DockerfileSlurm -t mri-train:slurm .
-docker save mri-train:slurm -o mri-train-slurm.tar
-scp mri-train-slurm.tar <user>@<cluster>:/path/to/project/
+# Option 1: Environment variable
+export WANDB_API_KEY="your_key"
+
+# Option 2: Store in .env file (recommended)
+echo "WANDB_API_KEY=your_key" > .env
+
+# Option 3: Store in home directory
+echo "your_key" > ~/.wandb_api_key
 ```
 
-On the cluster:
+### 3) Singularity Container Setup
+
+The recommended approach is to **pull a pre-built PyTorch container** instead of building from scratch (building from definition files often fails due to GLIBC/fakeroot issues).
 
 ```bash
-module load apptainer 2>/dev/null || true
-apptainer build mri-train.sif docker-archive://mri-train-slurm.tar
+# Pull PyTorch container with CUDA support
+apptainer pull mri-train.sif docker://pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 ```
 
-If your cluster provides `singularity` instead of `apptainer`, use:
+**Note:** If you get "not authorized to use apptainer", ensure you're in the `container` group. Contact your cluster admin if needed.
+
+**Alternative:** If pulling fails, the scripts will automatically fall back to native Python mode.
+
+## Job Submission
+
+### Basic Training Job
 
 ```bash
-singularity build mri-train.sif docker-archive://mri-train-slurm.tar
-```
+# With wandb logging (recommended)
+sbatch scripts/submit_slurm_wandb.sh
 
-### Option B: Use the provided helper
-
-If you have Docker + Singularity/Apptainer available on the same machine, you can try:
-
-```bash
-bash ./scripts/build_singularity.sh
-```
-
-It builds `mri-train.sif` in the project root.
-
-If your cluster does **not** have Docker (common), try the remote builder mode:
-
-```bash
-module load apptainer 2>/dev/null || true
-bash ./scripts/build_singularity.sh --remote
-```
-
-If you get a message like “not authorized to use apptainer” (or you’re not in a required *container* group), you have two options:
-
-- Request access from your cluster (often you must sign a container usage policy / be added to a `container` group).
-- Skip containers and run in **native Python mode** (see below).
-
-## 3) Submit a training job
-
-### JUWELS (JSC) notes
-
-JUWELS uses SLURM and requires an **account/budget** for charging. You can pass these at submission time (no script edits needed):
-
-```bash
-sbatch --account=<BUDGET> --partition=<PARTITION> scripts/submit_slurm.sh
-```
-
-For GPU jobs, request GPUs via `--gres=gpu:<N>` and choose a GPU-capable partition for your module.
-
-Containers on JUWELS are run via **Apptainer** (Singularity-compatible), and access may require joining a `container` group via JuDoor/JUDOOR (you’ll see “not authorized to use apptainer” until enabled).
-
-If Apptainer pulls/builds fail due to cache/temp locations, set these to a writable directory (e.g. project scratch) before running Apptainer:
-
-```bash
-export APPTAINER_CACHEDIR=$(mktemp -d -p <WRITABLE_DIRECTORY>)
-export APPTAINER_TMPDIR=$(mktemp -d -p <WRITABLE_DIRECTORY>)
-```
-
-### Container mode (default)
-
-`scripts/submit_slurm.sh` runs inside a `.sif` by default:
-
-```bash
+# Without wandb logging
 sbatch scripts/submit_slurm.sh
 ```
 
-Custom config / overrides:
+### Custom Configuration
 
 ```bash
-sbatch scripts/submit_slurm.sh --config config_onecycle.yaml
-sbatch scripts/submit_slurm.sh --epochs 100 --batch_size 16
+# Use different config file
+sbatch scripts/submit_slurm_wandb.sh --config config_onecycle.yaml
+
+# Override training parameters
+sbatch scripts/submit_slurm_wandb.sh --epochs 100 --batch_size 16
 ```
 
-If your `.sif` is not named `mri-train.sif`:
+### Cluster-Specific Options
+
+For clusters requiring account/budget specification:
 
 ```bash
-SINGULARITY_IMAGE=/path/to/mri-train.sif sbatch scripts/submit_slurm.sh
+sbatch --account=<BUDGET> --partition=<PARTITION> scripts/submit_slurm_wandb.sh
 ```
 
-### wandb logging (optional)
+For GPU jobs (if not using default GPU partition):
 
 ```bash
-export WANDB_API_KEY="your_key"
-sbatch scripts/submit_slurm_wandb.sh
+sbatch --gres=gpu:<N> --partition=<GPU_PARTITION> scripts/submit_slurm_wandb.sh
 ```
 
-### Native Python mode (no container)
+## How It Works
+
+The submission scripts automatically:
+
+1. **Load wandb API key** from `.env` file, `~/.wandb_api_key`, or environment variable
+2. **Use Singularity container** if `mri-train.sif` exists, otherwise fall back to native Python
+3. **Install dependencies** at runtime inside the container (`pip install -r requirements.txt`)
+4. **Mount directories** properly for data access and output storage
+5. **Handle GPU acceleration** through CUDA runtime in the container
+
+## Monitoring & Debugging
 
 ```bash
-USE_SINGULARITY=0 CONDA_ENV=mri sbatch scripts/submit_slurm.sh
-```
-
-In native mode you must ensure dependencies exist on the cluster (via modules + conda/venv). A common pattern is:
-
-```bash
-module load cuda 2>/dev/null || true
-module load anaconda 2>/dev/null || true
-conda create -n mri python=3.10 -y
-conda activate mri
-pip install -r requirements.txt
-```
-
-## 4) Monitor / debug
-
-```bash
+# Check job status
 squeue -u $USER
+
+# Monitor job output
 tail -f slurm-<jobid>.out
+
+# Check for errors
 tail -f slurm-<jobid>.err
+
+# Cancel job
 scancel <jobid>
 ```
 
-## 5) Common cluster-specific edits
+## Troubleshooting
 
-Edit the `#SBATCH` block at the top of `scripts/submit_slurm.sh`:
+### Common Issues
+
+**"WANDB_API_KEY not set"**
+- Add your key to `.env` file: `echo "WANDB_API_KEY=your_key" > .env`
+
+**"No such file or directory" errors**
+- Scripts use relative paths and should work from project directory
+- Ensure you're submitting from the project root
+
+**Container authorization errors**
+- Ensure you're in the `container` group on your cluster
+- Contact cluster admin for container access
+
+**Singularity build failures**
+- Use the pull approach instead of building from definition files
+- GLIBC/fakeroot issues are common and pulling pre-built containers avoids this
+
+### Fallback Mode
+
+If containers don't work, jobs automatically fall back to native Python mode. Ensure dependencies are available:
+
+```bash
+# Load required modules (cluster-specific)
+module load cuda anaconda
+
+# Create and activate environment
+conda create -n mri python=3.10 -y
+conda activate mri
+pip install -r requirements.txt
+
+# Submit in native mode
+USE_SINGULARITY=0 sbatch scripts/submit_slurm.sh
+```
+
+## Script Customization
+
+Edit the `#SBATCH` directives in `scripts/submit_slurm.sh` for cluster-specific settings:
 
 - `--partition`, `--account` (often required)
 - `--time`, `--mem`, `--cpus-per-task`
-- `--gres=gpu:<N>` for GPUs
+- `--gres=gpu:<N>` for GPU requests
+
+The scripts are designed to work out-of-the-box with minimal configuration required.

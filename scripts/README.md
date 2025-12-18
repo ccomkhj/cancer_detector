@@ -104,8 +104,8 @@ Edit `submit_slurm.sh` to change resource requests:
 #SBATCH --cpus-per-task=8      # CPU cores
 #SBATCH --mem=64G              # Memory
 #SBATCH --gres=gpu:1           # Number of GPUs
-#SBATCH --partition=gpu        # Partition name
-#SBATCH --account=your_account # Account (if required)
+#SBATCH --partition=gpus        # Partition name
+#SBATCH --account=ebrains-0000006 # Account
 ```
 
 ### Multi-GPU Training

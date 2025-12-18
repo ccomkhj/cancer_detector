@@ -8,7 +8,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
-#SBATCH --partition=gpu
+#SBATCH --partition=gpus
+#SBATCH --account=ebrains-0000006
 
 # ============================================================================
 # MRI Segmentation Training with Wandb - SLURM Job Script
@@ -46,9 +47,13 @@ set -e
 WANDB_PROJECT=${WANDB_PROJECT:-"mri-segmentation"}
 WANDB_ENTITY=${WANDB_ENTITY:-""}  # Leave empty for default entity
 
-# Load wandb API key if stored in file
-if [[ -z "${WANDB_API_KEY}" ]] && [[ -f "${HOME}/.wandb_api_key" ]]; then
-    export WANDB_API_KEY=$(cat "${HOME}/.wandb_api_key")
+# Load wandb API key if stored in file or .env
+if [[ -z "${WANDB_API_KEY}" ]]; then
+    if [[ -f "${HOME}/.wandb_api_key" ]]; then
+        export WANDB_API_KEY=$(cat "${HOME}/.wandb_api_key")
+    elif [[ -f ".env" ]]; then
+        export WANDB_API_KEY=$(grep "^WANDB_API_KEY=" .env | cut -d'=' -f2)
+    fi
 fi
 
 # Check for API key
@@ -70,6 +75,7 @@ if [[ -n "${WANDB_ENTITY}" ]]; then
 fi
 
 # Forward to main submit script with wandb enabled
-exec "$(dirname "${BASH_SOURCE[0]}")/submit_slurm.sh" ${WANDB_ARGS} "$@"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "${SCRIPT_DIR}/submit_slurm.sh" ${WANDB_ARGS} "$@"
 
 

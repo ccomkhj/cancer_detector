@@ -8,9 +8,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
-#SBATCH --partition=gpu
-# Uncomment and modify the following as needed for your cluster:
-# #SBATCH --account=your_account
+#SBATCH --partition=gpus
+#SBATCH --account=ebrains-0000006
 # #SBATCH --mail-type=BEGIN,END,FAIL
 # #SBATCH --mail-user=your_email@example.com
 
@@ -58,8 +57,13 @@ PROJECT_DIR=${PROJECT_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
 # wandb API key (set via environment or file)
 # Option 1: Export before submitting: export WANDB_API_KEY="your_key"
 # Option 2: Store in file: echo "your_key" > ~/.wandb_api_key
-if [[ -z "${WANDB_API_KEY}" ]] && [[ -f "${HOME}/.wandb_api_key" ]]; then
-    export WANDB_API_KEY=$(cat "${HOME}/.wandb_api_key")
+# Option 3: Store in .env file: WANDB_API_KEY=your_key
+if [[ -z "${WANDB_API_KEY}" ]]; then
+    if [[ -f "${HOME}/.wandb_api_key" ]]; then
+        export WANDB_API_KEY=$(cat "${HOME}/.wandb_api_key")
+    elif [[ -f ".env" ]]; then
+        export WANDB_API_KEY=$(grep "^WANDB_API_KEY=" .env | cut -d'=' -f2)
+    fi
 fi
 
 # ============================================================================
@@ -134,13 +138,14 @@ if [[ "${USE_SINGULARITY}" == "1" ]]; then
     
     # Run training in Singularity container
     "${CONTAINER_CMD}" exec --nv \
-        --bind "${PROJECT_DIR}/data:/app/data:ro" \
-        --bind "${PROJECT_DIR}/checkpoints:/app/checkpoints" \
-        --bind "${PROJECT_DIR}/.aim:/app/.aim" \
-        --bind "${PROJECT_DIR}/config.yaml:/app/config.yaml:ro" \
+        --bind "${PROJECT_DIR}:/workspace" \
+        --bind "${PROJECT_DIR}/data:/workspace/data:ro" \
+        --bind "${PROJECT_DIR}/checkpoints:/workspace/checkpoints" \
+        --bind "${PROJECT_DIR}/.aim:/workspace/.aim" \
         --env WANDB_API_KEY="${WANDB_API_KEY}" \
+        --env PYTHONPATH="/workspace" \
         "${SINGULARITY_IMAGE}" \
-        python /app/service/train.py ${TRAIN_ARGS}
+        bash -c "cd /workspace && pip install -r requirements.txt && python service/train.py ${TRAIN_ARGS}"
 
 else
     # ========================================================================
