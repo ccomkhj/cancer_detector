@@ -24,8 +24,8 @@ Usage:
     # Override specific parameters
     python service/train.py --config config.yaml --epochs 100 --batch_size 16
 
-    # Continue from checkpoint
-    python service/train.py --config config.yaml --resume checkpoints/model_epoch_10.pt
+    # Continue from checkpoint (use job-specific path)
+    python service/train.py --config config.yaml --resume checkpoints/755384/model_epoch_25.pt
 
     # Pure CLI (no config file)
     python service/train.py --manifest data/processed/class2/manifest.csv --epochs 50 --scheduler onecycle
@@ -740,9 +740,6 @@ def create_argument_parser():
         "--output_dir", type=str, default="checkpoints", help="Output directory"
     )
     parser.add_argument(
-        "--save_every", type=int, default=5, help="Save checkpoint every N epochs"
-    )
-    parser.add_argument(
         "--num_workers", type=int, default=4, help="Number of data loading workers"
     )
     parser.add_argument(
@@ -914,8 +911,20 @@ def main():
     best_dice = 0.0
 
     if args.resume:
-        print(f"Resuming from checkpoint: {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=device)
+        resume_path = Path(args.resume)
+        if not resume_path.exists():
+            # Try to find the checkpoint in the current job's directory
+            job_id = os.environ.get("SLURM_JOB_ID", "local")
+            job_checkpoint_dir = Path(args.output_dir) / job_id
+            alt_resume_path = job_checkpoint_dir / resume_path.name
+            if alt_resume_path.exists():
+                resume_path = alt_resume_path
+                print(f"Found checkpoint in job directory: {resume_path}")
+            else:
+                raise FileNotFoundError(f"Checkpoint not found: {args.resume}")
+
+        print(f"Resuming from checkpoint: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
@@ -1017,6 +1026,14 @@ def main():
                 print(f"\n⚠️  Failed to initialize wandb: {e}")
                 print("   wandb logging will be disabled.\n")
                 wandb_run = None
+
+    # Setup output directory with job ID
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    output_dir = Path(args.output_dir) / job_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Checkpoints will be saved to: {output_dir}")
+    print("Only the best model will be saved to conserve space.\n")
 
     # Training loop
     print("Starting training...\n")
@@ -1145,12 +1162,11 @@ def main():
             if new_lr != current_lr:
                 print(f"Learning rate changed: {current_lr:.2e} -> {new_lr:.2e}")
 
-        # Save checkpoint
+        # Save checkpoint (only best model to save space)
         is_best = val_dice > best_dice
         if is_best:
             best_dice = val_dice
 
-        if (epoch + 1) % args.save_every == 0 or is_best:
             checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -1168,44 +1184,27 @@ def main():
                 checkpoint["scheduler_state_dict"] = scheduler.state_dict()
 
             checkpoint_path = output_dir / f"model_epoch_{epoch+1}.pt"
-            torch.save(checkpoint, checkpoint_path)
-            print(f"✓ Saved checkpoint: {checkpoint_path}")
+            torch.save(checkpoint, best_path)
+            print(f"✓ Saved best model: {checkpoint_path} (Dice: {val_dice:.4f})")
 
-            # Log checkpoint
-            logger.log_checkpoint(
-                str(checkpoint_path),
-                epoch=epoch,
-                metrics={
-                    "train_loss": train_loss,
-                    "train_dice": train_dice,
-                    "val_loss": val_loss,
-                    "val_dice": val_dice,
-                },
+            # Log best model
+            logger.log_best_model(
+                {"val_loss": val_loss, "val_dice": val_dice}, epoch=epoch
             )
 
-            if is_best:
-                best_path = output_dir / "model_best.pt"
-                torch.save(checkpoint, best_path)
-                print(f"✓ Saved best model: {best_path}")
-
-                # Log best model
-                logger.log_best_model(
-                    {"val_loss": val_loss, "val_dice": val_dice}, epoch=epoch
+            # Log best metrics to wandb
+            if wandb_run is not None:
+                wandb.run.summary["best_val_dice"] = val_dice
+                wandb.run.summary["best_val_loss"] = val_loss
+                wandb.run.summary["best_epoch"] = epoch + 1
+                # Save model artifact to wandb
+                artifact = wandb.Artifact(
+                    name=f"model-best",
+                    type="model",
+                    description=f"Best model at epoch {epoch+1} with val_dice={val_dice:.4f}",
                 )
-
-                # Log best metrics to wandb
-                if wandb_run is not None:
-                    wandb.run.summary["best_val_dice"] = val_dice
-                    wandb.run.summary["best_val_loss"] = val_loss
-                    wandb.run.summary["best_epoch"] = epoch + 1
-                    # Save model artifact to wandb
-                    artifact = wandb.Artifact(
-                        name=f"model-best",
-                        type="model",
-                        description=f"Best model at epoch {epoch+1} with val_dice={val_dice:.4f}",
-                    )
-                    artifact.add_file(str(best_path))
-                    wandb_run.log_artifact(artifact)
+                artifact.add_file(str(checkpoint_path))
+                wandb_run.log_artifact(artifact)
 
         print()
 

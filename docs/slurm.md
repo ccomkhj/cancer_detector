@@ -14,6 +14,20 @@ This repo includes SLURM submission scripts in `scripts/` that support running t
 mkdir -p checkpoints .aim logs
 ```
 
+#### Checkpoint Storage
+
+Models are saved efficiently to conserve storage space:
+
+- **Location**: `checkpoints/<job-id>/model_epoch_X.pt`
+- **Policy**: Only the best performing model is kept (not all epochs)
+- **Resume**: Use `--resume checkpoints/<job-id>/model_epoch_X.pt`
+
+Example:
+```bash
+# Resume from a specific job's best checkpoint
+python service/train.py --config config.yaml --resume checkpoints/755384/model_epoch_25.pt
+```
+
 #### Data Directory Configuration
 
 For HPC setups where data is stored separately (e.g., in scratch space), you can specify the data location:
@@ -40,6 +54,41 @@ echo "WANDB_API_KEY=your_key" > .env
 
 # Option 3: Store in home directory
 echo "your_key" > ~/.wandb_api_key
+```
+
+**Note:** On HPC clusters, wandb automatically runs in offline mode due to network restrictions. Logs will be stored locally and can be synced later when you have internet access.
+
+### Wandb Offline Mode Workflow
+
+1. **During Training**: All logs are stored locally in `wandb/` directory
+2. **Directory Structure**:
+   ```
+   wandb/
+   └── offline-run-20241218_210000-abc123de/
+       ├── logs/
+       ├── files/
+       └── run-abc123de.wandb
+   ```
+
+### Syncing Offline Runs
+
+After training completes, sync your results to wandb servers (requires internet access):
+
+```bash
+# Navigate to your project directory
+cd /path/to/your/project
+
+# Sync all offline runs from HPC
+wandb sync wandb/offline-run-*
+
+# Or sync specific runs
+wandb sync wandb/offline-run-20241218_210000-abc123de
+
+# Check sync status
+wandb sync --status
+
+# View synced runs online
+wandb runs list
 ```
 
 #### Data Directory Configuration

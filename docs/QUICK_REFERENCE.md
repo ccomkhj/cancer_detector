@@ -49,8 +49,8 @@ python service/train.py --config config_onecycle.yaml
 # Override parameters
 python service/train.py --config config.yaml --epochs 100 --batch_size 16
 
-# Resume training
-python service/train.py --config config.yaml --resume checkpoints/model_best.pt
+# Resume training (use job-specific checkpoint)
+python service/train.py --config config.yaml --resume checkpoints/755384/model_epoch_25.pt
 ```
 
 ### Using CLI Arguments
@@ -139,7 +139,9 @@ data/
 ├── nbia/              # Raw DICOM (large, not backed up)
 └── splitted_images/   # Metadata parquet files
 
-checkpoints/           # Trained models
+checkpoints/           # Trained models (organized by job ID)
+├── 755384/           # Job ID subdirectories
+│   └── model_epoch_25.pt  # Best model only (space efficient)
 .aim/                  # Experiment tracking data
 validation_results/    # Validation visualizations
 ```
@@ -175,7 +177,8 @@ validation_results/    # Validation visualizations
 
 ### System
 - `num_workers`: Data loading workers, default: 4
-- `output_dir`: Checkpoint directory, default: checkpoints
+- `output_dir`: Checkpoint directory, default: checkpoints (auto-creates job ID subdirs)
+- **Note**: Only best model is saved per job to conserve storage space
 
 ## 🚨 Troubleshooting
 

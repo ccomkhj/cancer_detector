@@ -165,6 +165,7 @@ if [[ "${USE_SINGULARITY}" == "1" ]]; then
         --bind "${DATA_DIR}:/workspace/data:ro" \
         --bind "${PROJECT_DIR}/checkpoints:/workspace/checkpoints" \
         --env WANDB_API_KEY="${WANDB_API_KEY}" \
+        --env WANDB_MODE="offline" \
         --env PYTHONPATH="/workspace" \
         "${SINGULARITY_IMAGE}" \
         bash -c "cd /workspace && pip install -r requirements.txt && python service/train.py ${TRAIN_ARGS}"
