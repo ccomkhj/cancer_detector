@@ -87,10 +87,16 @@ class ExperimentLogger:
             repo_path = str(Path(__file__).parent.parent / ".aim")
 
         # Initialize Aim Run
-        self.run = Run(
-            repo=repo_path,
-            experiment=experiment_name,
-        )
+        try:
+            self.run = Run(
+                repo=repo_path,
+                experiment=experiment_name,
+            )
+        except Exception as e:
+            print(f"\n⚠️  Aim repository initialization failed: {e}")
+            print("   Aim logging will be disabled.\n")
+            self.aim_available = False
+            return
 
         # Set run name if provided
         if run_name:

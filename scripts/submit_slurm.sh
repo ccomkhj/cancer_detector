@@ -158,11 +158,12 @@ if [[ "${USE_SINGULARITY}" == "1" ]]; then
     echo ""
     
     # Run training in Singularity container
+    # Note: .aim directory not mounted to avoid version compatibility issues
+    # The container will use wandb for logging instead
     "${CONTAINER_CMD}" exec --nv \
         --bind "${PROJECT_DIR}:/workspace" \
         --bind "${DATA_DIR}:/workspace/data:ro" \
         --bind "${PROJECT_DIR}/checkpoints:/workspace/checkpoints" \
-        --bind "${PROJECT_DIR}/.aim:/workspace/.aim" \
         --env WANDB_API_KEY="${WANDB_API_KEY}" \
         --env PYTHONPATH="/workspace" \
         "${SINGULARITY_IMAGE}" \
