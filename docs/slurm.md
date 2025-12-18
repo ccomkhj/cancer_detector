@@ -7,11 +7,24 @@ This repo includes SLURM submission scripts in `scripts/` that support running t
 ### 1) Project Setup on Cluster
 
 1. Copy/clone this repo onto the cluster (preferably on a fast filesystem like `$SCRATCH`).
-2. Ensure your data is available under `data/` directory.
+2. Ensure your data is available. By default, the script looks for data in `data/` directory, but you can override this for HPC setups with separate data storage (see below).
 3. Create output directories:
 
 ```bash
 mkdir -p checkpoints .aim logs
+```
+
+#### Data Directory Configuration
+
+For HPC setups where data is stored separately (e.g., in scratch space), you can specify the data location:
+
+```bash
+# Option 1: Set environment variable before submission
+export DATA_DIR="/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/data"
+sbatch scripts/submit_slurm_wandb.sh
+
+# Option 2: The script defaults to this common HPC data path:
+# /p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/data
 ```
 
 ### 2) Wandb Setup (Optional)
@@ -27,6 +40,20 @@ echo "WANDB_API_KEY=your_key" > .env
 
 # Option 3: Store in home directory
 echo "your_key" > ~/.wandb_api_key
+```
+
+#### Data Directory Configuration
+
+For HPC setups where data is stored separately (e.g., in scratch space), you can specify the data location:
+
+```bash
+# Option 1: Environment variable (overrides .env)
+export DATA_DIR="/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/data"
+
+# Option 2: Store in .env file (recommended)
+echo "DATA_DIR=/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/data" >> .env
+
+# Option 3: The script defaults to the HPC data path if no .env is found
 ```
 
 ### 3) Singularity Container Setup
@@ -47,21 +74,21 @@ apptainer pull mri-train.sif docker://pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runt
 ### Basic Training Job
 
 ```bash
-# With wandb logging (recommended)
-sbatch scripts/submit_slurm_wandb.sh
+# With wandb logging (recommended) - includes account specification
+./scripts/submit_slurm_wandb.sh --account=ebrains-0000006
 
 # Without wandb logging
-sbatch scripts/submit_slurm.sh
+sbatch --account=ebrains-0000006 scripts/submit_slurm.sh
 ```
 
 ### Custom Configuration
 
 ```bash
 # Use different config file
-sbatch scripts/submit_slurm_wandb.sh --config config_onecycle.yaml
+./scripts/submit_slurm_wandb.sh --account=ebrains-0000006 --config config_onecycle.yaml
 
 # Override training parameters
-sbatch scripts/submit_slurm_wandb.sh --epochs 100 --batch_size 16
+./scripts/submit_slurm_wandb.sh --account=ebrains-0000006 --epochs 100 --batch_size 16
 ```
 
 ### Cluster-Specific Options
@@ -69,14 +96,16 @@ sbatch scripts/submit_slurm_wandb.sh --epochs 100 --batch_size 16
 For clusters requiring account/budget specification:
 
 ```bash
-sbatch --account=<BUDGET> --partition=<PARTITION> scripts/submit_slurm_wandb.sh
+./scripts/submit_slurm_wandb.sh --account=<BUDGET> --partition=<PARTITION>
 ```
 
 For GPU jobs (if not using default GPU partition):
 
 ```bash
-sbatch --gres=gpu:<N> --partition=<GPU_PARTITION> scripts/submit_slurm_wandb.sh
+./scripts/submit_slurm_wandb.sh --account=<BUDGET> --gres=gpu:<N> --partition=<GPU_PARTITION>
 ```
+
+**Note:** Use `./scripts/submit_slurm_wandb.sh` (not `sbatch`) as it's a wrapper script that passes options to sbatch internally.
 
 ## How It Works
 
@@ -114,6 +143,11 @@ scancel <jobid>
 **"No such file or directory" errors**
 - Scripts use relative paths and should work from project directory
 - Ensure you're submitting from the project root
+
+**Data directory not found**
+- Set `DATA_DIR` environment variable to point to your data location
+- Or add to `.env` file: `echo "DATA_DIR=/path/to/data" >> .env`
+- Default HPC path: `/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/data`
 
 **Container authorization errors**
 - Ensure you're in the `container` group on your cluster

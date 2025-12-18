@@ -11,7 +11,7 @@
 #SBATCH --partition=gpus
 #SBATCH --account=ebrains-0000006
 # #SBATCH --mail-type=BEGIN,END,FAIL
-# #SBATCH --mail-user=your_email@example.com
+# #SBATCH --mail-user=ccomkhj@gmail.com
 
 # ============================================================================
 # MRI Segmentation Training - SLURM Job Script
@@ -54,15 +54,36 @@ CONDA_ENV=${CONDA_ENV:-"mri"}
 # Project directory (auto-detected from script location)
 PROJECT_DIR=${PROJECT_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}
 
-# wandb API key (set via environment or file)
-# Option 1: Export before submitting: export WANDB_API_KEY="your_key"
-# Option 2: Store in file: echo "your_key" > ~/.wandb_api_key
-# Option 3: Store in .env file: WANDB_API_KEY=your_key
-if [[ -z "${WANDB_API_KEY}" ]]; then
-    if [[ -f "${HOME}/.wandb_api_key" ]]; then
+# Data directory (can be overridden for HPC setups with separate data storage)
+DATA_DIR=${DATA_DIR:-"${PROJECT_DIR}/data"}
+
+# Load configuration from .env file
+if [[ -f ".env" ]]; then
+    # wandb API key (set via environment or file)
+    # Option 1: Export before submitting: export WANDB_API_KEY="your_key"
+    # Option 2: Store in file: echo "your_key" > ~/.wandb_api_key
+    # Option 3: Store in .env file: WANDB_API_KEY=your_key
+    if [[ -z "${WANDB_API_KEY}" ]]; then
+        if [[ -f "${HOME}/.wandb_api_key" ]]; then
+            export WANDB_API_KEY=$(cat "${HOME}/.wandb_api_key")
+        else
+            export WANDB_API_KEY=$(grep "^WANDB_API_KEY=" .env | cut -d'=' -f2-)
+        fi
+    fi
+
+    # Data directory (for HPC setups with separate data storage)
+    # Option 1: Export before submitting: export DATA_DIR="/path/to/data"
+    # Option 2: Store in .env file: DATA_DIR=/path/to/data
+    if [[ -z "${DATA_DIR}" ]]; then
+        ENV_DATA_DIR=$(grep "^DATA_DIR=" .env | cut -d'=' -f2-)
+        if [[ -n "${ENV_DATA_DIR}" ]]; then
+            export DATA_DIR="${ENV_DATA_DIR}"
+        fi
+    fi
+else
+    # Fallback: load wandb API key from file if no .env
+    if [[ -z "${WANDB_API_KEY}" ]] && [[ -f "${HOME}/.wandb_api_key" ]]; then
         export WANDB_API_KEY=$(cat "${HOME}/.wandb_api_key")
-    elif [[ -f ".env" ]]; then
-        export WANDB_API_KEY=$(grep "^WANDB_API_KEY=" .env | cut -d'=' -f2)
     fi
 fi
 
@@ -139,7 +160,7 @@ if [[ "${USE_SINGULARITY}" == "1" ]]; then
     # Run training in Singularity container
     "${CONTAINER_CMD}" exec --nv \
         --bind "${PROJECT_DIR}:/workspace" \
-        --bind "${PROJECT_DIR}/data:/workspace/data:ro" \
+        --bind "${DATA_DIR}:/workspace/data:ro" \
         --bind "${PROJECT_DIR}/checkpoints:/workspace/checkpoints" \
         --bind "${PROJECT_DIR}/.aim:/workspace/.aim" \
         --env WANDB_API_KEY="${WANDB_API_KEY}" \
