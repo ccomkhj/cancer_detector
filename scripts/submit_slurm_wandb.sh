@@ -90,17 +90,31 @@ if [[ -n "${WANDB_ENTITY}" ]]; then
 fi
 
 # Submit the main script with wandb arguments
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Get script directory - handle both direct execution and sbatch execution
+if [[ -n "${BASH_SOURCE[0]}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    # Fallback if BASH_SOURCE is not available
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Change to project directory to ensure relative paths work correctly
+cd "${PROJECT_DIR}" || {
+    echo "ERROR: Cannot change to project directory: ${PROJECT_DIR}"
+    exit 1
+}
+
 # DATA_DIR is now loaded from .env file above, with fallback if not set
 DATA_DIR="${DATA_DIR:-${PROJECT_DIR}/data}"
 
 # Separate sbatch options from script arguments
+# Only match known sbatch options, not all --* arguments (to allow training args like --scheduler, --lr, etc.)
 SBATCH_OPTS=""
 SCRIPT_ARGS=""
 for arg in "$@"; do
     case "$arg" in
-        --account=*|--partition=*|--time=*|--mem=*|--nodes=*|--ntasks=*|--cpus-per-task=*|--gres=*|-A*|-p*|-t*|--*)
+        --account=*|--partition=*|--time=*|--mem=*|--nodes=*|--ntasks=*|--cpus-per-task=*|--gres=*|--job-name=*|--output=*|--error=*|--chdir=*|--export=*|--export-file=*|--array=*|--begin=*|--dependency=*|--deadline=*|--delay-boot=*|--cpu-freq=*|--comment=*|-A*|-p*|-t*|-c*|-d*|-D*|-e*|-o*|-J*|-N*|-n*|-w*)
             SBATCH_OPTS="${SBATCH_OPTS} $arg"
             ;;
         *)
@@ -109,6 +123,17 @@ for arg in "$@"; do
     esac
 done
 
-exec sbatch ${SBATCH_OPTS} --export=PROJECT_DIR="${PROJECT_DIR}",DATA_DIR="${DATA_DIR}",CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_DIR}/checkpoints}",WANDB_MODE="${WANDB_MODE}" "${SCRIPT_DIR}/submit_slurm.sh" ${WANDB_ARGS} ${SCRIPT_ARGS}
+# Ensure submit_slurm.sh path is absolute (SCRIPT_DIR is already absolute from pwd above)
+SUBMIT_SLURM_SCRIPT="${SCRIPT_DIR}/submit_slurm.sh"
+if [[ ! -f "${SUBMIT_SLURM_SCRIPT}" ]]; then
+    echo "ERROR: submit_slurm.sh not found at ${SUBMIT_SLURM_SCRIPT}"
+    echo "SCRIPT_DIR: ${SCRIPT_DIR}"
+    echo "Current directory: $(pwd)"
+    exit 1
+fi
+
+# SCRIPT_DIR is already absolute, so this path is also absolute
+# Use it directly to ensure sbatch can find it regardless of working directory
+exec sbatch ${SBATCH_OPTS} --export=PROJECT_DIR="${PROJECT_DIR}",DATA_DIR="${DATA_DIR}",CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_DIR}/checkpoints}",WANDB_MODE="${WANDB_MODE}" "${SUBMIT_SLURM_SCRIPT}" ${WANDB_ARGS} ${SCRIPT_ARGS}
 
 

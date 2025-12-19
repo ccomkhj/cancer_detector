@@ -614,6 +614,42 @@ def validate_epoch(
 # ===========================
 
 
+def get_git_commit_hash():
+    """Get current git commit hash for code versioning"""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent.parent,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def get_git_commit_hash():
+    """Get current git commit hash for code versioning"""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent.parent,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
 def load_config(config_path):
     """Load configuration from YAML file"""
     with open(config_path, "r") as f:
@@ -843,8 +879,10 @@ def main():
     print(f"Loss: {args.loss}")
     print(f"{'='*80}\n")
 
-    # Create output directory
-    output_dir = Path(args.output_dir)
+    # Create output directory (will be overridden later with job_id, but create base dir)
+    # Use CHECKPOINT_DIR from environment if set, otherwise use args.output_dir
+    checkpoint_base_dir = os.environ.get("CHECKPOINT_DIR", args.output_dir)
+    output_dir = Path(checkpoint_base_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create datasets
@@ -941,8 +979,8 @@ def main():
         resume_path = Path(args.resume)
         if not resume_path.exists():
             # Try to find the checkpoint in the current job's directory
-            job_id = os.environ.get("SLURM_JOB_ID", "local")
-            job_checkpoint_dir = Path(args.output_dir) / job_id
+            checkpoint_base_dir = os.environ.get("CHECKPOINT_DIR", args.output_dir)
+            job_checkpoint_dir = Path(checkpoint_base_dir) / job_id
             alt_resume_path = job_checkpoint_dir / resume_path.name
             if alt_resume_path.exists():
                 resume_path = alt_resume_path
@@ -968,6 +1006,9 @@ def main():
         print(f"  Resumed from epoch {start_epoch}")
         print(f"  Best Dice so far: {best_dice:.4f}\n")
 
+    # Get job_id early (used for wandb run name and checkpoint paths)
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    
     # Prepare hyperparameters dict (shared by Aim and wandb)
     hyperparams = {
         "manifest": str(args.manifest),
@@ -1042,8 +1083,14 @@ def main():
                     except Exception as weave_error:
                         print(f"⚠️  Weave initialization failed (non-critical): {weave_error}")
 
-                # Initialize wandb run
-                wandb_run_name = args.wandb_run_name or get_run_name(args)
+                # Initialize wandb run - use job_id as run name
+                wandb_run_name = job_id  # Use job_id as run name
+                
+                # Add git commit to hyperparams if available
+                git_commit = get_git_commit_hash()
+                if git_commit:
+                    hyperparams["git_commit"] = git_commit
+                
                 wandb_run = wandb.init(
                     project=args.wandb_project,
                     entity=args.wandb_entity,
@@ -1052,6 +1099,9 @@ def main():
                     mode=wandb_mode,  # Respect WANDB_MODE environment variable
                     reinit=True,
                 )
+                
+                # Save config.yaml as artifact if it exists (will be saved later after resolved config is created)
+                # This is handled after output_dir is created
 
                 print(f"\n✓ Wandb/Weave logging initialized")
                 print(f"  Project: {weave_project}")
@@ -1064,9 +1114,51 @@ def main():
                 wandb_run = None
 
     # Setup output directory with job ID
-    job_id = os.environ.get("SLURM_JOB_ID", "local")
-    output_dir = Path(args.output_dir) / job_id
+    # Use CHECKPOINT_DIR from environment if set, otherwise use args.output_dir
+    checkpoint_base_dir = os.environ.get("CHECKPOINT_DIR", args.output_dir)
+    output_dir = Path(checkpoint_base_dir) / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get git commit hash for code versioning
+    git_commit = get_git_commit_hash()
+    if git_commit:
+        print(f"Code version (git commit): {git_commit}")
+    else:
+        print("⚠️  Could not determine git commit hash")
+
+    # Save resolved config (after all overrides) as YAML
+    resolved_config_path = output_dir / "config_resolved.yaml"
+    resolved_config = vars(args)
+    # Add metadata
+    resolved_config["_metadata"] = {
+        "job_id": job_id,
+        "git_commit": git_commit,
+        "timestamp": datetime.now().isoformat(),
+    }
+    with open(resolved_config_path, "w") as f:
+        yaml.dump(resolved_config, f, default_flow_style=False, sort_keys=False)
+    print(f"✓ Saved resolved config: {resolved_config_path}")
+
+    # Save original config.yaml to checkpoint directory if it exists
+    if args.config and Path(args.config).exists():
+        config_artifact_path = output_dir / "config.yaml"
+        import shutil
+        shutil.copy2(args.config, config_artifact_path)
+        print(f"✓ Saved original config: {config_artifact_path}")
+        
+        # Also save to wandb artifacts
+        if wandb_run is not None:
+            try:
+                artifact = wandb.Artifact(
+                    name="config",
+                    type="config",
+                    description="Training configuration file",
+                )
+                artifact.add_file(str(args.config))
+                wandb_run.log_artifact(artifact)
+                print(f"  ✓ Saved config.yaml to wandb artifacts")
+            except Exception as artifact_error:
+                print(f"  ⚠️  Could not save config to wandb artifacts: {artifact_error}")
 
     print(f"Checkpoints will be saved to: {output_dir}")
     print("Only the best model will be saved to conserve space.\n")
@@ -1207,6 +1299,9 @@ def main():
         if is_best:
             best_dice = val_dice
 
+            # Get git commit for checkpoint
+            git_commit = get_git_commit_hash()
+            
             checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -1217,13 +1312,16 @@ def main():
                 "val_dice": val_dice,
                 "best_dice": best_dice,
                 "args": vars(args),
+                "job_id": job_id,
+                "git_commit": git_commit,
+                "timestamp": datetime.now().isoformat(),
             }
 
             # Save scheduler state if available
             if scheduler is not None:
                 checkpoint["scheduler_state_dict"] = scheduler.state_dict()
 
-            checkpoint_path = output_dir / f"model_epoch_{epoch+1}.pt"
+            checkpoint_path = output_dir / f"model_best_{job_id}_{epoch+1}.pt"
             torch.save(checkpoint, checkpoint_path)
             print(f"✓ Saved best model: {checkpoint_path} (Dice: {val_dice:.4f})")
 
