@@ -1299,6 +1299,16 @@ def main():
         if is_best:
             best_dice = val_dice
 
+            # Delete previous best model(s) for this job to keep only one best model
+            previous_best_pattern = f"model_best_{job_id}_*.pt"
+            previous_best_files = list(output_dir.glob(previous_best_pattern))
+            for prev_file in previous_best_files:
+                try:
+                    prev_file.unlink()
+                    print(f"  Deleted previous best model: {prev_file.name}")
+                except Exception as e:
+                    print(f"  ⚠️  Warning: Could not delete previous best model {prev_file.name}: {e}")
+
             # Get git commit for checkpoint
             git_commit = get_git_commit_hash()
             

@@ -38,20 +38,37 @@ WANDB_ENTITY=${WANDB_ENTITY:-""}  # Leave empty for default entity
 # Force offline mode for wandb (HPC clusters often don't have internet access)
 WANDB_MODE=${WANDB_MODE:-"offline"}
 
-# Load configuration from .env file
-if [[ -f ".env" ]]; then
+# Get project directory first so we can read .env from the correct location
+# Get script directory - handle both direct execution and sbatch execution
+if [[ -n "${BASH_SOURCE[0]}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    # Fallback if BASH_SOURCE is not available
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Change to project directory to ensure .env file is found
+cd "${PROJECT_DIR}" || {
+    echo "ERROR: Cannot change to project directory: ${PROJECT_DIR}"
+    exit 1
+}
+
+# Load configuration from .env file (now we're in the project directory)
+ENV_FILE="${PROJECT_DIR}/.env"
+if [[ -f "${ENV_FILE}" ]]; then
     # wandb API key
     if [[ -z "${WANDB_API_KEY}" ]]; then
         if [[ -f "${HOME}/.wandb_api_key" ]]; then
             export WANDB_API_KEY=$(cat "${HOME}/.wandb_api_key")
         else
-            export WANDB_API_KEY=$(grep "^WANDB_API_KEY=" .env | cut -d'=' -f2-)
+            export WANDB_API_KEY=$(grep "^WANDB_API_KEY=" "${ENV_FILE}" | cut -d'=' -f2-)
         fi
     fi
 
     # Data directory (load from .env if not set)
     if [[ -z "${DATA_DIR}" ]]; then
-        ENV_DATA_DIR=$(grep "^DATA_DIR=" .env | cut -d'=' -f2-)
+        ENV_DATA_DIR=$(grep "^DATA_DIR=" "${ENV_FILE}" | cut -d'=' -f2-)
         if [[ -n "${ENV_DATA_DIR}" ]]; then
             export DATA_DIR="${ENV_DATA_DIR}"
         fi
@@ -59,7 +76,7 @@ if [[ -f ".env" ]]; then
 
     # Checkpoint directory (load from .env if not set)
     if [[ -z "${CHECKPOINT_DIR}" ]]; then
-        ENV_CHECKPOINT_DIR=$(grep "^CHECKPOINT_DIR=" .env | cut -d'=' -f2-)
+        ENV_CHECKPOINT_DIR=$(grep "^CHECKPOINT_DIR=" "${ENV_FILE}" | cut -d'=' -f2-)
         if [[ -n "${ENV_CHECKPOINT_DIR}" ]]; then
             export CHECKPOINT_DIR="${ENV_CHECKPOINT_DIR}"
         fi
@@ -90,20 +107,7 @@ if [[ -n "${WANDB_ENTITY}" ]]; then
 fi
 
 # Submit the main script with wandb arguments
-# Get script directory - handle both direct execution and sbatch execution
-if [[ -n "${BASH_SOURCE[0]}" ]]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-else
-    # Fallback if BASH_SOURCE is not available
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-fi
-PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-# Change to project directory to ensure relative paths work correctly
-cd "${PROJECT_DIR}" || {
-    echo "ERROR: Cannot change to project directory: ${PROJECT_DIR}"
-    exit 1
-}
+# (PROJECT_DIR and SCRIPT_DIR are already set above, and we're already in PROJECT_DIR)
 
 # DATA_DIR is now loaded from .env file above, with fallback if not set
 DATA_DIR="${DATA_DIR:-${PROJECT_DIR}/data}"
