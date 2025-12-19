@@ -80,6 +80,16 @@ if [[ -f ".env" ]]; then
             export DATA_DIR="${ENV_DATA_DIR}"
         fi
     fi
+
+    # Checkpoint directory (for HPC setups with separate checkpoint storage)
+    # Option 1: Export before submitting: export CHECKPOINT_DIR="/path/to/checkpoints"
+    # Option 2: Store in .env file: CHECKPOINT_DIR=/path/to/checkpoints
+    if [[ -z "${CHECKPOINT_DIR}" ]]; then
+        ENV_CHECKPOINT_DIR=$(grep "^CHECKPOINT_DIR=" .env | cut -d'=' -f2-)
+        if [[ -n "${ENV_CHECKPOINT_DIR}" ]]; then
+            export CHECKPOINT_DIR="${ENV_CHECKPOINT_DIR}"
+        fi
+    fi
 else
     # Fallback: load wandb API key from file if no .env
     if [[ -z "${WANDB_API_KEY}" ]] && [[ -f "${HOME}/.wandb_api_key" ]]; then
@@ -158,14 +168,29 @@ if [[ "${USE_SINGULARITY}" == "1" ]]; then
     echo ""
     
     # Run training in Singularity container
-    # Note: .aim directory not mounted to avoid version compatibility issues
-    # The container will use wandb for logging instead
+    # Mount .aim directory for Aim logging (version warnings are handled gracefully)
+    # Wandb runs in offline mode for HPC clusters without internet access
+    WANDB_MODE_VALUE=${WANDB_MODE:-"offline"}
+    
+    # Set checkpoint directory (use CHECKPOINT_DIR from .env if set, otherwise use project dir)
+    CHECKPOINT_DIR_VALUE=${CHECKPOINT_DIR:-"${PROJECT_DIR}/checkpoints"}
+    
+    # Ensure checkpoint directory exists
+    mkdir -p "${CHECKPOINT_DIR_VALUE}"
+    
+    # Build bind mounts
+    BIND_MOUNTS=(
+        "--bind" "${PROJECT_DIR}:/workspace"
+        "--bind" "${DATA_DIR}:/workspace/data:ro"
+        "--bind" "${CHECKPOINT_DIR_VALUE}:/workspace/checkpoints"
+        "--bind" "${PROJECT_DIR}/.aim:/workspace/.aim"
+        "--bind" "${PROJECT_DIR}/wandb:/workspace/wandb"
+    )
+    
     "${CONTAINER_CMD}" exec --nv \
-        --bind "${PROJECT_DIR}:/workspace" \
-        --bind "${DATA_DIR}:/workspace/data:ro" \
-        --bind "${PROJECT_DIR}/checkpoints:/workspace/checkpoints" \
+        "${BIND_MOUNTS[@]}" \
         --env WANDB_API_KEY="${WANDB_API_KEY}" \
-        --env WANDB_MODE="offline" \
+        --env WANDB_MODE="${WANDB_MODE_VALUE}" \
         --env PYTHONPATH="/workspace" \
         "${SINGULARITY_IMAGE}" \
         bash -c "cd /workspace && pip install -r requirements.txt && python service/train.py ${TRAIN_ARGS}"

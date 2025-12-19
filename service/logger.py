@@ -86,7 +86,12 @@ class ExperimentLogger:
             # Default to .aim in project root
             repo_path = str(Path(__file__).parent.parent / ".aim")
 
+        # Ensure .aim directory exists
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
         # Initialize Aim Run
+        # Note: If you see "Trying to open repository ... which is out of date" warnings,
+        # they are non-critical. Aim will still work, but you can upgrade with: aim repo upgrade
         try:
             self.run = Run(
                 repo=repo_path,

@@ -2,6 +2,21 @@
 
 This repo includes SLURM submission scripts in `scripts/` that support running training in a **Singularity/Apptainer container** with automatic dependency installation.
 
+## Quick Start
+
+```bash
+# 1. Build container in scratch space (avoids disk quota issues)
+./scripts/build_singularity.sh --scratch --fakeroot
+
+# 2. Set wandb API key (optional)
+echo "WANDB_API_KEY=your_key" > .env
+
+# 3. Submit training job
+sbatch scripts/submit_slurm.sh --wandb --wandb_project myproject
+```
+
+**Tip:** Always use `--scratch` when building containers on HPC clusters to avoid home directory disk quota limits.
+
 ## Prerequisites
 
 ### 1) Project Setup on Cluster
@@ -107,7 +122,46 @@ echo "DATA_DIR=/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/data" >> .
 
 ### 3) Singularity Container Setup
 
-The recommended approach is to **pull a pre-built PyTorch container** instead of building from scratch (building from definition files often fails due to GLIBC/fakeroot issues).
+#### Building the Container Image
+
+The container image can be built from the `singularity.def` definition file. **It's recommended to build in scratch space** to avoid home directory disk quota issues.
+
+##### Option 1: Build in Scratch Space (Recommended)
+
+This avoids home directory quota issues by using scratch space for both the build cache and output image:
+
+```bash
+# Auto-detect scratch directory
+./scripts/build_singularity.sh --scratch --fakeroot
+
+# Or specify custom scratch directory
+./scripts/build_singularity.sh --scratch-dir /p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation --fakeroot
+
+# With custom output name
+./scripts/build_singularity.sh --scratch --output my-custom-image.sif --fakeroot
+```
+
+**Benefits:**
+- Avoids home directory disk quota limits
+- Apptainer cache stored in scratch space (not home directory)
+- Image built directly in scratch space
+- Automatically detected by submission scripts
+
+##### Option 2: Build in Project Directory
+
+If you have sufficient space in your home directory:
+
+```bash
+# Build in current directory
+./scripts/build_singularity.sh --fakeroot
+
+# With custom output name
+./scripts/build_singularity.sh --output my-image.sif --fakeroot
+```
+
+##### Option 3: Pull Pre-built Container (Alternative)
+
+If building fails, you can pull a pre-built PyTorch container:
 
 ```bash
 # Pull PyTorch container with CUDA support
@@ -116,7 +170,12 @@ apptainer pull mri-train.sif docker://pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runt
 
 **Note:** If you get "not authorized to use apptainer", ensure you're in the `container` group. Contact your cluster admin if needed.
 
-**Alternative:** If pulling fails, the scripts will automatically fall back to native Python mode.
+**Important:** The submission scripts automatically detect the image location:
+- Project directory: `mri-train.sif`
+- Scratch space: `/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/mri-train.sif`
+- Or specify explicitly: `SINGULARITY_IMAGE=/path/to/image.sif sbatch scripts/submit_slurm.sh`
+
+**Fallback:** If no container is found, the scripts will automatically fall back to native Python mode.
 
 ## Job Submission
 
@@ -161,10 +220,15 @@ For GPU jobs (if not using default GPU partition):
 The submission scripts automatically:
 
 1. **Load wandb API key** from `.env` file, `~/.wandb_api_key`, or environment variable
-2. **Use Singularity container** if `mri-train.sif` exists, otherwise fall back to native Python
+2. **Detect Singularity container** by checking:
+   - Project directory: `mri-train.sif`
+   - Scratch space: `/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/mri-train.sif`
+   - `$SCRATCH` environment variable location
+   - Falls back to native Python if no container found
 3. **Install dependencies** at runtime inside the container (`pip install -r requirements.txt`)
 4. **Mount directories** properly for data access and output storage
 5. **Handle GPU acceleration** through CUDA runtime in the container
+6. **Run wandb in offline mode** automatically (for HPC clusters without internet access)
 
 ## Monitoring & Debugging
 
@@ -198,13 +262,35 @@ scancel <jobid>
 - Or add to `.env` file: `echo "DATA_DIR=/path/to/data" >> .env`
 - Default HPC path: `/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/data`
 
+**Container image not found**
+- The script automatically searches:
+  - Project directory: `mri-train.sif`
+  - Scratch space: `/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/mri-train.sif`
+  - `$SCRATCH` environment variable location
+- To specify custom location: `SINGULARITY_IMAGE=/path/to/image.sif sbatch scripts/submit_slurm.sh`
+- Or build the image: `./scripts/build_singularity.sh --scratch --fakeroot`
+
 **Container authorization errors**
 - Ensure you're in the `container` group on your cluster
 - Contact cluster admin for container access
 
+**"Disk quota exceeded" during build**
+- **Solution:** Build in scratch space using `--scratch` flag:
+  ```bash
+  ./scripts/build_singularity.sh --scratch --fakeroot
+  ```
+- This redirects Apptainer cache to scratch space (avoids home directory quota)
+- Image is also built in scratch space
+- Submission scripts automatically detect images in scratch space
+
 **Singularity build failures**
-- Use the pull approach instead of building from definition files
-- GLIBC/fakeroot issues are common and pulling pre-built containers avoids this
+- Try building with `--fakeroot` flag if you get permission errors
+- Use `--scratch` to avoid disk quota issues
+- If building still fails, try pulling pre-built container:
+  ```bash
+  apptainer pull mri-train.sif docker://pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+  ```
+- GLIBC/fakeroot issues are common - using scratch space often resolves them
 
 ### Fallback Mode
 

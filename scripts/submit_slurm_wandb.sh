@@ -35,6 +35,8 @@ set -e
 # Configuration
 WANDB_PROJECT=${WANDB_PROJECT:-"mri-segmentation"}
 WANDB_ENTITY=${WANDB_ENTITY:-""}  # Leave empty for default entity
+# Force offline mode for wandb (HPC clusters often don't have internet access)
+WANDB_MODE=${WANDB_MODE:-"offline"}
 
 # Load configuration from .env file
 if [[ -f ".env" ]]; then
@@ -52,6 +54,14 @@ if [[ -f ".env" ]]; then
         ENV_DATA_DIR=$(grep "^DATA_DIR=" .env | cut -d'=' -f2-)
         if [[ -n "${ENV_DATA_DIR}" ]]; then
             export DATA_DIR="${ENV_DATA_DIR}"
+        fi
+    fi
+
+    # Checkpoint directory (load from .env if not set)
+    if [[ -z "${CHECKPOINT_DIR}" ]]; then
+        ENV_CHECKPOINT_DIR=$(grep "^CHECKPOINT_DIR=" .env | cut -d'=' -f2-)
+        if [[ -n "${ENV_CHECKPOINT_DIR}" ]]; then
+            export CHECKPOINT_DIR="${ENV_CHECKPOINT_DIR}"
         fi
     fi
 else
@@ -99,6 +109,6 @@ for arg in "$@"; do
     esac
 done
 
-exec sbatch ${SBATCH_OPTS} --export=PROJECT_DIR="${PROJECT_DIR}",DATA_DIR="${DATA_DIR}" "${SCRIPT_DIR}/submit_slurm.sh" ${WANDB_ARGS} ${SCRIPT_ARGS}
+exec sbatch ${SBATCH_OPTS} --export=PROJECT_DIR="${PROJECT_DIR}",DATA_DIR="${DATA_DIR}",CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_DIR}/checkpoints}",WANDB_MODE="${WANDB_MODE}" "${SCRIPT_DIR}/submit_slurm.sh" ${WANDB_ARGS} ${SCRIPT_ARGS}
 
 

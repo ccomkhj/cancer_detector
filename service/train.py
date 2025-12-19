@@ -461,6 +461,8 @@ def train_epoch(
     step_on="epoch",
     logger=None,
     epoch=0,
+    wandb_run=None,
+    log_batch_every=10,
 ):
     """Train for one epoch with batch-level logging"""
     model.train()
@@ -515,6 +517,18 @@ def train_epoch(
                 step=global_step,
                 context="train_batch",
             )
+        
+        # Log batch-level metrics to wandb (every N batches to reduce overhead)
+        if wandb_run is not None and batch_idx % log_batch_every == 0:
+            global_step = epoch * len(dataloader) + batch_idx
+            wandb.log(
+                {
+                    "train/batch_loss": loss.item(),
+                    "train/batch_dice": dice,
+                    "learning_rate": current_lr,
+                },
+                step=global_step,
+            )
 
     avg_loss = total_loss / max(num_batches, 1)
     avg_dice = total_dice / max(num_batches, 1)
@@ -530,6 +544,8 @@ def validate_epoch(
     save_visualizations=False,
     logger=None,
     epoch=0,
+    wandb_run=None,
+    log_batch_every=10,
 ):
     """Validate for one epoch with batch-level logging"""
     model.eval()
@@ -568,6 +584,17 @@ def validate_epoch(
                     },
                     step=global_step,
                     context="val_batch",
+                )
+            
+            # Log batch-level metrics to wandb (every N batches to reduce overhead)
+            if wandb_run is not None and batch_idx % log_batch_every == 0:
+                global_step = epoch * len(dataloader) + batch_idx
+                wandb.log(
+                    {
+                        "val/batch_loss": loss.item(),
+                        "val/batch_dice": dice,
+                    },
+                    step=global_step,
                 )
 
             # Save first batch for visualization
@@ -1001,11 +1028,19 @@ def main():
             print("   wandb logging will be disabled.\n")
         else:
             try:
-                # Initialize weave for tracking
+                # Check if we're in offline mode (for HPC clusters without internet)
+                wandb_mode = os.environ.get("WANDB_MODE", "online")
+                
+                # Initialize weave for tracking (skip if offline)
                 weave_project = args.wandb_project
                 if args.wandb_entity:
                     weave_project = f"{args.wandb_entity}/{args.wandb_project}"
-                weave.init(weave_project)
+                
+                if wandb_mode != "offline":
+                    try:
+                        weave.init(weave_project)
+                    except Exception as weave_error:
+                        print(f"⚠️  Weave initialization failed (non-critical): {weave_error}")
 
                 # Initialize wandb run
                 wandb_run_name = args.wandb_run_name or get_run_name(args)
@@ -1014,6 +1049,7 @@ def main():
                     entity=args.wandb_entity,
                     name=wandb_run_name,
                     config=hyperparams,
+                    mode=wandb_mode,  # Respect WANDB_MODE environment variable
                     reinit=True,
                 )
 
@@ -1054,6 +1090,8 @@ def main():
             step_on,
             logger=logger,
             epoch=epoch,
+            wandb_run=wandb_run,
+            log_batch_every=10,  # Log every 10 batches to wandb
         )
         print(f"Train - Loss: {train_loss:.4f}, Dice: {train_dice:.4f}")
 
@@ -1086,6 +1124,8 @@ def main():
             save_visualizations=should_visualize,
             logger=logger,
             epoch=epoch,
+            wandb_run=wandb_run,
+            log_batch_every=10,  # Log every 10 batches to wandb
         )
         print(f"Val   - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}")
 
@@ -1184,7 +1224,7 @@ def main():
                 checkpoint["scheduler_state_dict"] = scheduler.state_dict()
 
             checkpoint_path = output_dir / f"model_epoch_{epoch+1}.pt"
-            torch.save(checkpoint, best_path)
+            torch.save(checkpoint, checkpoint_path)
             print(f"✓ Saved best model: {checkpoint_path} (Dice: {val_dice:.4f})")
 
             # Log best model
@@ -1197,14 +1237,18 @@ def main():
                 wandb.run.summary["best_val_dice"] = val_dice
                 wandb.run.summary["best_val_loss"] = val_loss
                 wandb.run.summary["best_epoch"] = epoch + 1
-                # Save model artifact to wandb
-                artifact = wandb.Artifact(
-                    name=f"model-best",
-                    type="model",
-                    description=f"Best model at epoch {epoch+1} with val_dice={val_dice:.4f}",
-                )
-                artifact.add_file(str(checkpoint_path))
-                wandb_run.log_artifact(artifact)
+                # Save model artifact to wandb (works in offline mode)
+                try:
+                    artifact = wandb.Artifact(
+                        name=f"model-best",
+                        type="model",
+                        description=f"Best model at epoch {epoch+1} with val_dice={val_dice:.4f}",
+                    )
+                    artifact.add_file(str(checkpoint_path))
+                    wandb_run.log_artifact(artifact)
+                except Exception as artifact_error:
+                    # Artifact logging may fail in offline mode, but that's okay
+                    print(f"⚠️  Could not log artifact (non-critical): {artifact_error}")
 
         print()
 
