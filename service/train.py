@@ -52,17 +52,29 @@ from datetime import datetime
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import yaml
 from logger import ExperimentLogger, get_run_name
+from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from tools.dataset.dataset_2d5_multiclass import (
     MRI25DMultiClassDataset,
     create_multiclass_dataloader,
+)
+
+# Import models and metrics from separate modules
+from service.models import SimpleUNet, DiceLoss, DiceBCELoss
+from service.metrics import (
+    compute_dice_score,
+    compute_precision,
+    compute_recall,
+    initialize_monai_metrics,
+    MONAI_AVAILABLE,
 )
 
 # Optional wandb/weave integration
@@ -167,135 +179,6 @@ def get_scheduler(optimizer, scheduler_type, total_epochs, steps_per_epoch, args
 def get_current_lr(optimizer):
     """Get current learning rate from optimizer"""
     return optimizer.param_groups[0]["lr"]
-
-
-# ===========================
-# Loss Functions
-# ===========================
-
-
-class DiceLoss(nn.Module):
-    """Dice Loss for segmentation"""
-
-    def __init__(self, smooth=1.0):
-        super().__init__()
-        self.smooth = smooth
-
-    def forward(self, pred, target):
-        """
-        Args:
-            pred: (B, 1, H, W) - raw logits
-            target: (B, 1, H, W) - binary mask
-        """
-        pred = torch.sigmoid(pred)
-
-        pred_flat = pred.view(-1)
-        target_flat = target.view(-1)
-
-        intersection = (pred_flat * target_flat).sum()
-
-        dice = (2.0 * intersection + self.smooth) / (
-            pred_flat.sum() + target_flat.sum() + self.smooth
-        )
-
-        return 1 - dice
-
-
-class DiceBCELoss(nn.Module):
-    """Combined Dice + BCE Loss"""
-
-    def __init__(self, dice_weight=0.5, bce_weight=0.5):
-        super().__init__()
-        self.dice_loss = DiceLoss()
-        self.bce_loss = nn.BCEWithLogitsLoss()
-        self.dice_weight = dice_weight
-        self.bce_weight = bce_weight
-
-    def forward(self, pred, target):
-        dice = self.dice_loss(pred, target)
-        bce = self.bce_loss(pred, target)
-        return self.dice_weight * dice + self.bce_weight * bce
-
-
-# ===========================
-# Simple U-Net Model
-# ===========================
-
-
-class SimpleUNet(nn.Module):
-    """Simple 2.5D U-Net for multi-class segmentation"""
-
-    def __init__(
-        self, in_channels=5, out_channels=3
-    ):  # 3 classes: prostate, target1, target2
-        super().__init__()
-
-        # Encoder
-        self.enc1 = self._block(in_channels, 64)
-        self.enc2 = self._block(64, 128)
-        self.enc3 = self._block(128, 256)
-        self.enc4 = self._block(256, 512)
-
-        # Bottleneck
-        self.bottleneck = self._block(512, 1024)
-
-        # Decoder
-        self.upconv4 = nn.ConvTranspose2d(1024, 512, 2, stride=2)
-        self.dec4 = self._block(1024, 512)
-
-        self.upconv3 = nn.ConvTranspose2d(512, 256, 2, stride=2)
-        self.dec3 = self._block(512, 256)
-
-        self.upconv2 = nn.ConvTranspose2d(256, 128, 2, stride=2)
-        self.dec2 = self._block(256, 128)
-
-        self.upconv1 = nn.ConvTranspose2d(128, 64, 2, stride=2)
-        self.dec1 = self._block(128, 64)
-
-        # Output
-        self.out = nn.Conv2d(64, out_channels, 1)
-
-        self.pool = nn.MaxPool2d(2)
-
-    def _block(self, in_ch, out_ch):
-        return nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x):
-        # Encoder
-        enc1 = self.enc1(x)
-        enc2 = self.enc2(self.pool(enc1))
-        enc3 = self.enc3(self.pool(enc2))
-        enc4 = self.enc4(self.pool(enc3))
-
-        # Bottleneck
-        bottleneck = self.bottleneck(self.pool(enc4))
-
-        # Decoder
-        dec4 = self.upconv4(bottleneck)
-        dec4 = torch.cat([dec4, enc4], dim=1)
-        dec4 = self.dec4(dec4)
-
-        dec3 = self.upconv3(dec4)
-        dec3 = torch.cat([dec3, enc3], dim=1)
-        dec3 = self.dec3(dec3)
-
-        dec2 = self.upconv2(dec3)
-        dec2 = torch.cat([dec2, enc2], dim=1)
-        dec2 = self.dec2(dec2)
-
-        dec1 = self.upconv1(dec2)
-        dec1 = torch.cat([dec1, enc1], dim=1)
-        dec1 = self.dec1(dec1)
-
-        out = self.out(dec1)
-        return out
 
 
 # ===========================
@@ -414,39 +297,6 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
 
 
 # ===========================
-# Metrics
-# ===========================
-
-
-def compute_dice_score(pred, target, threshold=0.5):
-    """
-    Compute Dice score for multi-class segmentation
-
-    Args:
-        pred: (B, C, H, W) - raw logits
-        target: (B, C, H, W) - binary masks
-
-    Returns:
-        Mean Dice score across all classes
-    """
-    pred = torch.sigmoid(pred)
-    pred = (pred > threshold).float()
-
-    # Compute Dice per class
-    dice_scores = []
-    for c in range(pred.shape[1]):
-        pred_c = pred[:, c].reshape(-1)
-        target_c = target[:, c].reshape(-1)
-
-        intersection = (pred_c * target_c).sum()
-        dice = (2.0 * intersection) / (pred_c.sum() + target_c.sum() + 1e-8)
-        dice_scores.append(dice.item())
-
-    # Return mean Dice across classes
-    return np.mean(dice_scores)
-
-
-# ===========================
 # Training
 # ===========================
 
@@ -541,22 +391,47 @@ def validate_epoch(
     dataloader,
     criterion,
     device,
+    dice_metric=None,
+    dice_metric_per_class=None,
+    post_pred=None,
+    post_label=None,
     save_visualizations=False,
     logger=None,
     epoch=0,
     wandb_run=None,
     log_batch_every=10,
 ):
-    """Validate for one epoch with batch-level logging"""
+    """
+    Validate for one epoch with batch-level logging
+    
+    Args:
+        dice_metric: MONAI DiceMetric for mean Dice (if MONAI available)
+        dice_metric_per_class: MONAI DiceMetric for per-class Dice (if MONAI available)
+        post_pred: MONAI AsDiscrete transform for predictions
+        post_label: MONAI AsDiscrete transform for labels
+    """
     model.eval()
     total_loss = 0
-    total_dice = 0
+    total_precision = 0
+    total_recall = 0
+    # Per-class accumulators
+    total_precision_per_class = [0.0, 0.0, 0.0]  # [prostate, target1, target2]
+    total_recall_per_class = [0.0, 0.0, 0.0]  # [prostate, target1, target2]
+    # Dice accumulators (for fallback when MONAI not available)
+    total_dice = 0.0
+    total_dice_per_class = [0.0, 0.0, 0.0]  # [prostate, target1, target2]
     num_batches = 0
 
     # Store first batch for visualization
     vis_images = None
     vis_masks_gt = None
     vis_masks_pred = None
+
+    # Reset MONAI metrics at start of validation
+    if dice_metric is not None:
+        dice_metric.reset()
+    if dice_metric_per_class is not None:
+        dice_metric_per_class.reset()
 
     with torch.no_grad():
         pbar = tqdm(dataloader, desc="Validation")
@@ -566,22 +441,83 @@ def validate_epoch(
 
             outputs = model(images)
             loss = criterion(outputs, masks)
-            dice = compute_dice_score(outputs, masks)
+            
+            # Compute precision/recall (custom implementation)
+            precision = compute_precision(outputs, masks)
+            recall = compute_recall(outputs, masks)
+            # Get per-class metrics
+            precision_per_class = compute_precision(outputs, masks, return_per_class=True)
+            recall_per_class = compute_recall(outputs, masks, return_per_class=True)
+
+            # Use MONAI DiceMetric if available
+            if dice_metric is not None and post_pred is not None and post_label is not None:
+                # Apply sigmoid and threshold
+                probs = torch.sigmoid(outputs)
+                
+                # MONAI expects list of tensors per batch element
+                # Each tensor shape: (C, H, W)
+                batch_size = probs.shape[0]
+                preds_list = []
+                targets_list = []
+                
+                for b in range(batch_size):
+                    # Apply post-processing (threshold)
+                    pred_b = post_pred(probs[b])  # (C, H, W)
+                    target_b = post_label(masks[b])  # (C, H, W)
+                    preds_list.append(pred_b)
+                    targets_list.append(target_b)
+                
+                # Update MONAI metrics
+                dice_metric(y_pred=preds_list, y=targets_list)
+                dice_metric_per_class(y_pred=preds_list, y=targets_list)
+                
+                # For progress bar, compute batch Dice using custom function
+                dice = compute_dice_score(outputs, masks)
+            else:
+                # Fallback to custom Dice computation
+                dice = compute_dice_score(outputs, masks)
+                # Also compute per-class Dice for fallback
+                pred = torch.sigmoid(outputs)
+                pred = (pred > 0.5).float()
+                for c in range(3):
+                    pred_c = pred[:, c].reshape(-1)
+                    target_c = masks[:, c].reshape(-1)
+                    intersection = (pred_c * target_c).sum()
+                    dice_c = (2.0 * intersection) / (pred_c.sum() + target_c.sum() + 1e-8)
+                    total_dice_per_class[c] += dice_c.item()
+                total_dice += dice
 
             total_loss += loss.item()
-            total_dice += dice
+            total_precision += precision
+            total_recall += recall
+            for c in range(3):
+                total_precision_per_class[c] += precision_per_class[c]
+                total_recall_per_class[c] += recall_per_class[c]
             num_batches += 1
 
-            pbar.set_postfix({"loss": f"{loss.item():.4f}", "dice": f"{dice:.4f}"})
+            pbar.set_postfix({
+                "loss": f"{loss.item():.4f}",
+                "dice": f"{dice:.4f}",
+                "prec": f"{precision:.4f}",
+                "rec": f"{recall:.4f}",
+            })
 
             # Log batch-level metrics
             if logger is not None:
                 global_step = epoch * len(dataloader) + batch_idx
+                batch_metrics = {
+                    "batch_loss": loss.item(),
+                    "batch_dice": dice,
+                    "batch_precision": precision,
+                    "batch_recall": recall,
+                }
+                # Add per-class metrics
+                class_names = ["prostate", "target1", "target2"]
+                for c, name in enumerate(class_names):
+                    batch_metrics[f"batch_precision_{name}"] = precision_per_class[c]
+                    batch_metrics[f"batch_recall_{name}"] = recall_per_class[c]
                 logger.log_metrics(
-                    {
-                        "batch_loss": loss.item(),
-                        "batch_dice": dice,
-                    },
+                    batch_metrics,
                     step=global_step,
                     context="val_batch",
                 )
@@ -589,13 +525,18 @@ def validate_epoch(
             # Log batch-level metrics to wandb (every N batches to reduce overhead)
             if wandb_run is not None and batch_idx % log_batch_every == 0:
                 global_step = epoch * len(dataloader) + batch_idx
-                wandb.log(
-                    {
-                        "val/batch_loss": loss.item(),
-                        "val/batch_dice": dice,
-                    },
-                    step=global_step,
-                )
+                wandb_metrics = {
+                    "val/batch_loss": loss.item(),
+                    "val/batch_dice": dice,
+                    "val/batch_precision": precision,
+                    "val/batch_recall": recall,
+                }
+                # Add per-class metrics
+                class_names = ["prostate", "target1", "target2"]
+                for c, name in enumerate(class_names):
+                    wandb_metrics[f"val/batch_precision_{name}"] = precision_per_class[c]
+                    wandb_metrics[f"val/batch_recall_{name}"] = recall_per_class[c]
+                wandb.log(wandb_metrics, step=global_step)
 
             # Save first batch for visualization
             if save_visualizations and batch_idx == 0:
@@ -603,33 +544,38 @@ def validate_epoch(
                 vis_masks_gt = masks
                 vis_masks_pred = torch.sigmoid(outputs)
 
-    avg_loss = total_loss / max(num_batches, 1)
-    avg_dice = total_dice / max(num_batches, 1)
+    # Aggregate MONAI Dice metrics
+    if dice_metric is not None and dice_metric_per_class is not None:
+        mean_dice, not_nans = dice_metric.aggregate()
+        per_class_dice, not_nans_per_class = dice_metric_per_class.aggregate()
+        
+        # Convert to Python scalars/lists
+        if isinstance(mean_dice, torch.Tensor):
+            avg_dice = mean_dice.item()
+        else:
+            avg_dice = float(mean_dice)
+            
+        if isinstance(per_class_dice, torch.Tensor):
+            per_class_dice_list = per_class_dice.tolist()
+        else:
+            per_class_dice_list = list(per_class_dice)
+    else:
+        # Fallback: use accumulated batch-averaged Dice
+        avg_dice = total_dice / max(num_batches, 1) if num_batches > 0 else 0.0
+        per_class_dice_list = [d / max(num_batches, 1) for d in total_dice_per_class] if num_batches > 0 else [0.0, 0.0, 0.0]
 
-    return avg_loss, avg_dice, (vis_images, vis_masks_gt, vis_masks_pred)
+    avg_loss = total_loss / max(num_batches, 1)
+    avg_precision = total_precision / max(num_batches, 1)
+    avg_recall = total_recall / max(num_batches, 1)
+    avg_precision_per_class = [p / max(num_batches, 1) for p in total_precision_per_class]
+    avg_recall_per_class = [r / max(num_batches, 1) for r in total_recall_per_class]
+
+    return avg_loss, avg_dice, avg_precision, avg_recall, avg_precision_per_class, avg_recall_per_class, per_class_dice_list, (vis_images, vis_masks_gt, vis_masks_pred)
 
 
 # ===========================
 # Configuration
 # ===========================
-
-
-def get_git_commit_hash():
-    """Get current git commit hash for code versioning"""
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=Path(__file__).parent.parent,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return None
 
 
 def get_git_commit_hash():
@@ -877,12 +823,11 @@ def main():
     print(f"Epochs: {args.epochs}")
     print(f"Learning rate: {args.lr}")
     print(f"Loss: {args.loss}")
+    print(f"Output directory: {args.output_dir}")
     print(f"{'='*80}\n")
 
-    # Create output directory (will be overridden later with job_id, but create base dir)
-    # Use CHECKPOINT_DIR from environment if set, otherwise use args.output_dir
-    checkpoint_base_dir = os.environ.get("CHECKPOINT_DIR", args.output_dir)
-    output_dir = Path(checkpoint_base_dir)
+    # Create output directory
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create datasets
@@ -895,6 +840,30 @@ def main():
         skip_no_masks=True,
         target_size=(512, 512),  # Resize all images and masks to 512x512
     )
+    
+    # Collect original input sizes from the dataset
+    print("Collecting input image sizes...")
+    original_sizes = set()
+    df = pd.read_csv(args.manifest)
+    # Sample up to 100 images to check sizes (to avoid loading all)
+    sample_size = min(100, len(df))
+    sample_df = df.sample(n=sample_size, random_state=42) if len(df) > sample_size else df
+    for _, row in sample_df.iterrows():
+        img_path = Path(row['image_path'])
+        if img_path.exists():
+            try:
+                img = Image.open(img_path)
+                original_sizes.add(img.size)  # PIL size is (width, height)
+            except Exception as e:
+                pass  # Skip if can't read
+    
+    # Print input size information
+    if original_sizes:
+        print(f"  Original input sizes found: {sorted(original_sizes)}")
+        print(f"  Target size (after resize): {train_dataset.target_size[1]}x{train_dataset.target_size[0]} (width x height)")
+        print(f"  All images will be resized to: {train_dataset.target_size[0]}x{train_dataset.target_size[1]} (height x width)")
+    else:
+        print("  Could not determine original input sizes")
 
     # Split train/val (80/20)
     train_size = int(0.8 * len(train_dataset))
@@ -971,6 +940,9 @@ def main():
         print(f"  Scheduler: None (constant learning rate)")
     print()
 
+    # Get job_id early (used for checkpoint paths and wandb run name)
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    
     # Resume from checkpoint
     start_epoch = 0
     best_dice = 0.0
@@ -979,8 +951,7 @@ def main():
         resume_path = Path(args.resume)
         if not resume_path.exists():
             # Try to find the checkpoint in the current job's directory
-            checkpoint_base_dir = os.environ.get("CHECKPOINT_DIR", args.output_dir)
-            job_checkpoint_dir = Path(checkpoint_base_dir) / job_id
+            job_checkpoint_dir = Path(args.output_dir) / job_id
             alt_resume_path = job_checkpoint_dir / resume_path.name
             if alt_resume_path.exists():
                 resume_path = alt_resume_path
@@ -1006,9 +977,6 @@ def main():
         print(f"  Resumed from epoch {start_epoch}")
         print(f"  Best Dice so far: {best_dice:.4f}\n")
 
-    # Get job_id early (used for wandb run name and checkpoint paths)
-    job_id = os.environ.get("SLURM_JOB_ID", "local")
-    
     # Prepare hyperparameters dict (shared by Aim and wandb)
     hyperparams = {
         "manifest": str(args.manifest),
@@ -1114,9 +1082,7 @@ def main():
                 wandb_run = None
 
     # Setup output directory with job ID
-    # Use CHECKPOINT_DIR from environment if set, otherwise use args.output_dir
-    checkpoint_base_dir = os.environ.get("CHECKPOINT_DIR", args.output_dir)
-    output_dir = Path(checkpoint_base_dir) / job_id
+    output_dir = Path(args.output_dir) / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Get git commit hash for code versioning
@@ -1163,6 +1129,15 @@ def main():
     print(f"Checkpoints will be saved to: {output_dir}")
     print("Only the best model will be saved to conserve space.\n")
 
+    # Initialize MONAI metrics for validation
+    print("Initializing metrics...")
+    dice_metric, dice_metric_per_class, post_pred, post_label = initialize_monai_metrics(num_classes=3)
+    
+    if dice_metric is not None:
+        print("  ✓ MONAI DiceMetric initialized (mean and per-class)")
+    else:
+        print("  ⚠️  Using custom Dice computation (MONAI not available)")
+
     # Training loop
     print("Starting training...\n")
 
@@ -1208,35 +1183,55 @@ def main():
 
         # Validate
         should_visualize = (epoch + 1) % args.vis_every == 0 or epoch == start_epoch
-        val_loss, val_dice, vis_data = validate_epoch(
+        val_loss, val_dice, val_precision, val_recall, val_precision_per_class, val_recall_per_class, val_dice_per_class, vis_data = validate_epoch(
             model,
             val_loader,
             criterion,
             device,
+            dice_metric=dice_metric,
+            dice_metric_per_class=dice_metric_per_class,
+            post_pred=post_pred,
+            post_label=post_label,
             save_visualizations=should_visualize,
             logger=logger,
             epoch=epoch,
             wandb_run=wandb_run,
             log_batch_every=10,  # Log every 10 batches to wandb
         )
-        print(f"Val   - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}")
+        print(f"Val   - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}, Precision: {val_precision:.4f}, Recall: {val_recall:.4f}")
+        print(f"      - Dice per class: Prostate={val_dice_per_class[0]:.4f}, Target1={val_dice_per_class[1]:.4f}, Target2={val_dice_per_class[2]:.4f}")
+        print(f"      - Precision per class: Prostate={val_precision_per_class[0]:.4f}, Target1={val_precision_per_class[1]:.4f}, Target2={val_precision_per_class[2]:.4f}")
+        print(f"      - Recall per class: Prostate={val_recall_per_class[0]:.4f}, Target1={val_recall_per_class[1]:.4f}, Target2={val_recall_per_class[2]:.4f}")
 
         # Log epoch-level validation metrics
-        logger.log_metrics(
-            {"loss": val_loss, "dice": val_dice},
-            step=epoch,
-            context="val",
-        )
+        val_metrics = {
+            "loss": val_loss,
+            "dice": val_dice,
+            "precision": val_precision,
+            "recall": val_recall,
+        }
+        # Add per-class metrics
+        class_names = ["prostate", "target1", "target2"]
+        for c, name in enumerate(class_names):
+            val_metrics[f"dice_{name}"] = val_dice_per_class[c]
+            val_metrics[f"precision_{name}"] = val_precision_per_class[c]
+            val_metrics[f"recall_{name}"] = val_recall_per_class[c]
+        logger.log_metrics(val_metrics, step=epoch, context="val")
 
         # Log validation metrics to wandb
         if wandb_run is not None:
-            wandb.log(
-                {
-                    "val/loss": val_loss,
-                    "val/dice": val_dice,
-                },
-                step=epoch,
-            )
+            wandb_metrics = {
+                "val/loss": val_loss,
+                "val/dice": val_dice,
+                "val/precision": val_precision,
+                "val/recall": val_recall,
+            }
+            # Add per-class metrics
+            for c, name in enumerate(class_names):
+                wandb_metrics[f"val/dice_{name}"] = val_dice_per_class[c]
+                wandb_metrics[f"val/precision_{name}"] = val_precision_per_class[c]
+                wandb_metrics[f"val/recall_{name}"] = val_recall_per_class[c]
+            wandb.log(wandb_metrics, step=epoch)
 
         # Log visualizations if generated
         if should_visualize and vis_data[0] is not None:
@@ -1255,10 +1250,19 @@ def main():
                 for name, fig in visualizations.items():
                     # Convert figure to numpy array
                     fig.canvas.draw()
-                    img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-                    img_array = img_array.reshape(
-                        fig.canvas.get_width_height()[::-1] + (3,)
-                    )
+                    # Use buffer_rgba() for newer matplotlib versions, fallback to tostring_rgb()
+                    try:
+                        buffer = fig.canvas.buffer_rgba()
+                        img_array = np.asarray(buffer)
+                    except AttributeError:
+                        # Fallback for older matplotlib versions
+                        img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                        img_array = img_array.reshape(
+                            fig.canvas.get_width_height()[::-1] + (3,)
+                        )
+                    else:
+                        # buffer_rgba() returns RGBA, convert to RGB
+                        img_array = img_array[:, :, :3]
 
                     logger.log_images(
                         {name: img_array}, step=epoch, context="val_predictions"
@@ -1320,6 +1324,11 @@ def main():
                 "train_dice": train_dice,
                 "val_loss": val_loss,
                 "val_dice": val_dice,
+                "val_dice_per_class": val_dice_per_class,
+                "val_precision": val_precision,
+                "val_recall": val_recall,
+                "val_precision_per_class": val_precision_per_class,
+                "val_recall_per_class": val_recall_per_class,
                 "best_dice": best_dice,
                 "args": vars(args),
                 "job_id": job_id,
@@ -1329,21 +1338,54 @@ def main():
 
             # Save scheduler state if available
             if scheduler is not None:
-                checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+                try:
+                    scheduler_state = scheduler.state_dict()
+                    checkpoint["scheduler_state_dict"] = scheduler_state
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not save scheduler state: {e}")
+                    # Continue without scheduler state
 
             checkpoint_path = output_dir / f"model_best_{job_id}_{epoch+1}.pt"
-            torch.save(checkpoint, checkpoint_path)
-            print(f"✓ Saved best model: {checkpoint_path} (Dice: {val_dice:.4f})")
+            try:
+                torch.save(checkpoint, checkpoint_path)
+                print(f"✓ Saved best model: {checkpoint_path} (Dice: {val_dice:.4f}, Precision: {val_precision:.4f}, Recall: {val_recall:.4f})")
+            except Exception as e:
+                print(f"⚠️  Failed to save checkpoint: {e}")
+                # Clean up any partially written file
+                if checkpoint_path.exists():
+                    try:
+                        checkpoint_path.unlink()
+                        print(f"  Removed corrupted checkpoint file: {checkpoint_path}")
+                    except Exception as cleanup_e:
+                        print(f"  Warning: Could not remove corrupted file: {cleanup_e}")
+                raise  # Re-raise the exception to stop training
 
             # Log best model
-            logger.log_best_model(
-                {"val_loss": val_loss, "val_dice": val_dice}, epoch=epoch
-            )
+            best_model_metrics = {
+                "val_loss": val_loss,
+                "val_dice": val_dice,
+                "val_precision": val_precision,
+                "val_recall": val_recall,
+            }
+            # Add per-class metrics
+            class_names = ["prostate", "target1", "target2"]
+            for c, name in enumerate(class_names):
+                best_model_metrics[f"val_dice_{name}"] = val_dice_per_class[c]
+                best_model_metrics[f"val_precision_{name}"] = val_precision_per_class[c]
+                best_model_metrics[f"val_recall_{name}"] = val_recall_per_class[c]
+            logger.log_best_model(best_model_metrics, epoch=epoch)
 
             # Log best metrics to wandb
             if wandb_run is not None:
                 wandb.run.summary["best_val_dice"] = val_dice
                 wandb.run.summary["best_val_loss"] = val_loss
+                wandb.run.summary["best_val_precision"] = val_precision
+                wandb.run.summary["best_val_recall"] = val_recall
+                # Add per-class metrics
+                for c, name in enumerate(class_names):
+                    wandb.run.summary[f"best_val_dice_{name}"] = val_dice_per_class[c]
+                    wandb.run.summary[f"best_val_precision_{name}"] = val_precision_per_class[c]
+                    wandb.run.summary[f"best_val_recall_{name}"] = val_recall_per_class[c]
                 wandb.run.summary["best_epoch"] = epoch + 1
                 # Save model artifact to wandb (works in offline mode)
                 try:

@@ -90,6 +90,21 @@ if [[ -f ".env" ]]; then
             export CHECKPOINT_DIR="${ENV_CHECKPOINT_DIR}"
         fi
     fi
+
+    # WandB directory (use scratch space to avoid home directory quota issues)
+    # Option 1: Export before submitting: export WANDB_DIR="/path/to/wandb"
+    # Option 2: Store in .env file: WANDB_DIR=/path/to/wandb
+    if [[ -z "${WANDB_DIR}" ]]; then
+        ENV_WANDB_DIR=$(grep "^WANDB_DIR=" .env | cut -d'=' -f2-)
+        if [[ -n "${ENV_WANDB_DIR}" ]]; then
+            export WANDB_DIR="${ENV_WANDB_DIR}"
+        else
+            # Default to scratch space if available
+            if [[ -d "/p/scratch/ebrains-0000006/kim27" ]]; then
+                export WANDB_DIR="/p/scratch/ebrains-0000006/kim27/wandb"
+            fi
+        fi
+    fi
 else
     # Fallback: load wandb API key from file if no .env
     if [[ -z "${WANDB_API_KEY}" ]] && [[ -f "${HOME}/.wandb_api_key" ]]; then
@@ -134,6 +149,23 @@ echo ""
 # Default training arguments
 TRAIN_ARGS="--config config.yaml"
 
+# Set checkpoint directory (use CHECKPOINT_DIR from .env if set, otherwise use project dir)
+CHECKPOINT_DIR_VALUE=${CHECKPOINT_DIR:-"${PROJECT_DIR}/checkpoints"}
+
+# Check if --output_dir is already in the arguments
+HAS_OUTPUT_DIR=0
+for arg in "$@"; do
+    if [[ "$arg" == "--output_dir" ]] || [[ "$arg" == --output_dir=* ]]; then
+        HAS_OUTPUT_DIR=1
+        break
+    fi
+done
+
+# Add --output_dir from CHECKPOINT_DIR if not already provided
+if [[ ${HAS_OUTPUT_DIR} -eq 0 ]]; then
+    TRAIN_ARGS="${TRAIN_ARGS} --output_dir ${CHECKPOINT_DIR_VALUE}"
+fi
+
 # Append any additional arguments passed to the script
 if [[ $# -gt 0 ]]; then
     TRAIN_ARGS="${TRAIN_ARGS} $@"
@@ -172,11 +204,20 @@ if [[ "${USE_SINGULARITY}" == "1" ]]; then
     # Wandb runs in offline mode for HPC clusters without internet access
     WANDB_MODE_VALUE=${WANDB_MODE:-"offline"}
     
-    # Set checkpoint directory (use CHECKPOINT_DIR from .env if set, otherwise use project dir)
-    CHECKPOINT_DIR_VALUE=${CHECKPOINT_DIR:-"${PROJECT_DIR}/checkpoints"}
-    
     # Ensure checkpoint directory exists
     mkdir -p "${CHECKPOINT_DIR_VALUE}"
+    
+    # Set up WandB directory (use scratch space to avoid home directory quota)
+    WANDB_DIR_VALUE=${WANDB_DIR:-"${PROJECT_DIR}/wandb"}
+    mkdir -p "${WANDB_DIR_VALUE}"
+    
+    # Set up temporary directory (use scratch space to avoid home directory quota)
+    if [[ -d "/p/scratch/ebrains-0000006/kim27" ]]; then
+        TMPDIR_VALUE="/p/scratch/ebrains-0000006/kim27/tmp"
+    else
+        TMPDIR_VALUE="${PROJECT_DIR}/tmp"
+    fi
+    mkdir -p "${TMPDIR_VALUE}"
     
     # Build bind mounts
     BIND_MOUNTS=(
@@ -184,13 +225,17 @@ if [[ "${USE_SINGULARITY}" == "1" ]]; then
         "--bind" "${DATA_DIR}:/workspace/data:ro"
         "--bind" "${CHECKPOINT_DIR_VALUE}:/workspace/checkpoints"
         "--bind" "${PROJECT_DIR}/.aim:/workspace/.aim"
-        "--bind" "${PROJECT_DIR}/wandb:/workspace/wandb"
+        "--bind" "${WANDB_DIR_VALUE}:/workspace/wandb"
     )
     
     "${CONTAINER_CMD}" exec --nv \
         "${BIND_MOUNTS[@]}" \
         --env WANDB_API_KEY="${WANDB_API_KEY}" \
         --env WANDB_MODE="${WANDB_MODE_VALUE}" \
+        --env WANDB_DIR="/workspace/wandb" \
+        --env TMPDIR="${TMPDIR_VALUE}" \
+        --env TMP="${TMPDIR_VALUE}" \
+        --env TEMP="${TMPDIR_VALUE}" \
         --env PYTHONPATH="/workspace" \
         "${SINGULARITY_IMAGE}" \
         bash -c "cd /workspace && pip install -r requirements.txt && python service/train.py ${TRAIN_ARGS}"
@@ -224,6 +269,26 @@ else
     echo "Python: $(which python)"
     echo "PyTorch version: $(python -c 'import torch; print(torch.__version__)')"
     echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())')"
+    echo ""
+    
+    # Set up WandB directory (use scratch space to avoid home directory quota)
+    WANDB_DIR_VALUE=${WANDB_DIR:-"${PROJECT_DIR}/wandb"}
+    if [[ -d "/p/scratch/ebrains-0000006/kim27" ]]; then
+        WANDB_DIR_VALUE="/p/scratch/ebrains-0000006/kim27/wandb"
+        TMPDIR_VALUE="/p/scratch/ebrains-0000006/kim27/tmp"
+    else
+        WANDB_DIR_VALUE="${PROJECT_DIR}/wandb"
+        TMPDIR_VALUE="${PROJECT_DIR}/tmp"
+    fi
+    mkdir -p "${WANDB_DIR_VALUE}"
+    mkdir -p "${TMPDIR_VALUE}"
+    export WANDB_DIR="${WANDB_DIR_VALUE}"
+    export TMPDIR="${TMPDIR_VALUE}"
+    export TMP="${TMPDIR_VALUE}"
+    export TEMP="${TMPDIR_VALUE}"
+    
+    echo "WandB directory: ${WANDB_DIR_VALUE}"
+    echo "Temp directory: ${TMPDIR_VALUE}"
     echo ""
     
     # Run training

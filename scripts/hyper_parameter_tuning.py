@@ -31,6 +31,28 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def load_env_file() -> Dict[str, str]:
+    """Load environment variables from .env file."""
+    env_vars = {}
+    env_file = PROJECT_ROOT / ".env"
+    
+    if env_file.exists():
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                # Skip comments and empty lines
+                if not line or line.startswith('#'):
+                    continue
+                # Parse KEY=VALUE format
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    env_vars[key] = value
+    
+    return env_vars
+
+
 def load_base_config(config_path: str = "config.yaml") -> Dict:
     """Load the base configuration file."""
     config_file = PROJECT_ROOT / config_path
@@ -78,6 +100,17 @@ def submit_job(config_overrides: Dict, base_config: Dict) -> Optional[str]:
     
     # Build CLI arguments from config overrides (training arguments)
     cli_args = []
+    
+    # Check if --output_dir is already in config_overrides
+    has_output_dir = 'output_dir' in config_overrides
+    
+    # Load CHECKPOINT_DIR from .env if --output_dir not already specified
+    if not has_output_dir:
+        env_vars = load_env_file()
+        checkpoint_dir = env_vars.get('CHECKPOINT_DIR')
+        if checkpoint_dir:
+            cli_args.extend(['--output_dir', checkpoint_dir])
+    
     for key, value in config_overrides.items():
         # Convert config key format (scheduler_factor) to CLI format (--scheduler_factor)
         arg_key = f"--{key}"
@@ -258,7 +291,6 @@ HYPERPARAMETER_CONFIGS = [
         "name": "onecycle_batch_16",
         "scheduler": "onecycle",
         "lr": 0.0001,
-        "batch_size": 16,
         "scheduler_max_lr_mult": 10.0,
     },
     
@@ -297,6 +329,14 @@ def main():
     print(f"\nSLURM Configuration:")
     print(f"  Account: {SLURM_ACCOUNT}")
     print(f"  Partition: {SLURM_PARTITION}")
+    
+    # Load and display CHECKPOINT_DIR from .env
+    env_vars = load_env_file()
+    checkpoint_dir = env_vars.get('CHECKPOINT_DIR')
+    if checkpoint_dir:
+        print(f"  Checkpoint Dir: {checkpoint_dir} (from .env)")
+    else:
+        print(f"  Checkpoint Dir: (not set in .env, will use default)")
     print("="*80)
     
     # Load base config

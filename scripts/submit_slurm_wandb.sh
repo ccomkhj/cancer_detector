@@ -112,20 +112,40 @@ fi
 # DATA_DIR is now loaded from .env file above, with fallback if not set
 DATA_DIR="${DATA_DIR:-${PROJECT_DIR}/data}"
 
+# Set up WandB directory (use scratch space to avoid home directory quota)
+if [[ -z "${WANDB_DIR}" ]]; then
+    ENV_WANDB_DIR=$(grep "^WANDB_DIR=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2-)
+    if [[ -n "${ENV_WANDB_DIR}" ]]; then
+        export WANDB_DIR="${ENV_WANDB_DIR}"
+    elif [[ -d "/p/scratch/ebrains-0000006/kim27" ]]; then
+        export WANDB_DIR="/p/scratch/ebrains-0000006/kim27/wandb"
+    fi
+fi
+
 # Separate sbatch options from script arguments
 # Only match known sbatch options, not all --* arguments (to allow training args like --scheduler, --lr, etc.)
 SBATCH_OPTS=""
 SCRIPT_ARGS=""
+HAS_OUTPUT_DIR=0
 for arg in "$@"; do
     case "$arg" in
         --account=*|--partition=*|--time=*|--mem=*|--nodes=*|--ntasks=*|--cpus-per-task=*|--gres=*|--job-name=*|--output=*|--error=*|--chdir=*|--export=*|--export-file=*|--array=*|--begin=*|--dependency=*|--deadline=*|--delay-boot=*|--cpu-freq=*|--comment=*|-A*|-p*|-t*|-c*|-d*|-D*|-e*|-o*|-J*|-N*|-n*|-w*)
             SBATCH_OPTS="${SBATCH_OPTS} $arg"
+            ;;
+        --output_dir|--output_dir=*)
+            HAS_OUTPUT_DIR=1
+            SCRIPT_ARGS="${SCRIPT_ARGS} $arg"
             ;;
         *)
             SCRIPT_ARGS="${SCRIPT_ARGS} $arg"
             ;;
     esac
 done
+
+# Add --output_dir from CHECKPOINT_DIR if not already provided
+if [[ ${HAS_OUTPUT_DIR} -eq 0 ]] && [[ -n "${CHECKPOINT_DIR}" ]]; then
+    SCRIPT_ARGS="${SCRIPT_ARGS} --output_dir ${CHECKPOINT_DIR}"
+fi
 
 # Ensure submit_slurm.sh path is absolute (SCRIPT_DIR is already absolute from pwd above)
 SUBMIT_SLURM_SCRIPT="${SCRIPT_DIR}/submit_slurm.sh"
@@ -138,6 +158,6 @@ fi
 
 # SCRIPT_DIR is already absolute, so this path is also absolute
 # Use it directly to ensure sbatch can find it regardless of working directory
-exec sbatch ${SBATCH_OPTS} --export=PROJECT_DIR="${PROJECT_DIR}",DATA_DIR="${DATA_DIR}",CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_DIR}/checkpoints}",WANDB_MODE="${WANDB_MODE}" "${SUBMIT_SLURM_SCRIPT}" ${WANDB_ARGS} ${SCRIPT_ARGS}
+exec sbatch ${SBATCH_OPTS} --export=PROJECT_DIR="${PROJECT_DIR}",DATA_DIR="${DATA_DIR}",CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_DIR}/checkpoints}",WANDB_DIR="${WANDB_DIR:-}",WANDB_MODE="${WANDB_MODE}" "${SUBMIT_SLURM_SCRIPT}" ${WANDB_ARGS} ${SCRIPT_ARGS}
 
 
