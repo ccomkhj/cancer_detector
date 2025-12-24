@@ -34,6 +34,9 @@
 #   # Use native Python instead of Singularity
 #   USE_SINGULARITY=0 sbatch scripts/submit_slurm.sh
 #
+#   # Custom threshold sweep frequency
+#   THR_SWEEP_EVERY=10 sbatch scripts/submit_slurm.sh --epochs 100
+#
 # ============================================================================
 
 set -e  # Exit on error
@@ -148,6 +151,10 @@ echo ""
 
 # Default training arguments
 TRAIN_ARGS="--config config.yaml"
+
+# Add threshold sweep frequency (default: every 5 epochs to avoid overwhelming W&B)
+THR_SWEEP_EVERY=${THR_SWEEP_EVERY:-5}
+TRAIN_ARGS="${TRAIN_ARGS} --thr_sweep_every ${THR_SWEEP_EVERY}"
 
 # Set checkpoint directory (use CHECKPOINT_DIR from .env if set, otherwise use project dir)
 CHECKPOINT_DIR_VALUE=${CHECKPOINT_DIR:-"${PROJECT_DIR}/checkpoints"}

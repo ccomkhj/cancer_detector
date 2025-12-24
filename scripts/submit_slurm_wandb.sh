@@ -28,6 +28,9 @@
 #   # With additional training arguments
 #   sbatch scripts/submit_slurm_wandb.sh --epochs 100 --batch_size 32
 #
+#   # Custom threshold sweep frequency
+#   THR_SWEEP_EVERY=10 sbatch scripts/submit_slurm_wandb.sh --epochs 100
+#
 # ============================================================================
 
 set -e
@@ -105,6 +108,10 @@ WANDB_ARGS="--wandb --wandb_project ${WANDB_PROJECT}"
 if [[ -n "${WANDB_ENTITY}" ]]; then
     WANDB_ARGS="${WANDB_ARGS} --wandb_entity ${WANDB_ENTITY}"
 fi
+
+# Add threshold sweep frequency (default: every 5 epochs to avoid overwhelming W&B)
+THR_SWEEP_EVERY=${THR_SWEEP_EVERY:-5}
+WANDB_ARGS="${WANDB_ARGS} --thr_sweep_every ${THR_SWEEP_EVERY}"
 
 # Submit the main script with wandb arguments
 # (PROJECT_DIR and SCRIPT_DIR are already set above, and we're already in PROJECT_DIR)

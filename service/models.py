@@ -26,8 +26,8 @@ class DiceLoss(nn.Module):
         """
         pred = torch.sigmoid(pred)
 
-        pred_flat = pred.view(-1)
-        target_flat = target.view(-1)
+        pred_flat = pred.reshape(-1)
+        target_flat = target.reshape(-1)
 
         intersection = (pred_flat * target_flat).sum()
 
@@ -52,6 +52,75 @@ class DiceBCELoss(nn.Module):
         dice = self.dice_loss(pred, target)
         bce = self.bce_loss(pred, target)
         return self.dice_weight * dice + self.bce_weight * bce
+
+
+class FocalTverskyLoss(nn.Module):
+    """Focal Tversky Loss for multi-class segmentation
+
+    Focal-Tversky = (1 - Tversky)^γ
+    Tversky = (TP + smooth) / (TP + α*FN + β*FP + smooth)
+
+    Args:
+        alpha: List of α values per class [prostate, target1, target2]
+        beta: List of β values per class [prostate, target1, target2]
+        gamma: Focal parameter γ
+        class_weights: List of class weights [prostate, target1, target2]
+        smooth: Smoothing constant
+    """
+
+    def __init__(self, alpha=[0.6, 0.8, 0.8], beta=[0.4, 0.2, 0.2], gamma=1.33,
+                 class_weights=[1.0, 2.0, 2.0], smooth=1e-6):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.class_weights = class_weights
+        self.smooth = smooth
+
+    def forward(self, pred_logits, target):
+        """
+        Args:
+            pred_logits: (B, C, H, W) - raw logits, C=3 for [prostate, target1, target2]
+            target: (B, C, H, W) - binary masks
+        Returns:
+            loss: Scalar loss value
+        """
+        # Convert logits to probabilities
+        pred_probs = torch.sigmoid(pred_logits)
+
+        # Initialize loss accumulator
+        total_loss = 0.0
+        num_classes = pred_logits.shape[1]
+
+        for c in range(num_classes):
+            # Get predictions and targets for this class
+            pred_c = pred_probs[:, c]  # (B, H, W)
+            target_c = target[:, c]  # (B, H, W)
+
+            # Flatten
+            pred_flat = pred_c.reshape(-1)
+            target_flat = target_c.reshape(-1)
+
+            # Compute TP, FP, FN
+            tp = (pred_flat * target_flat).sum()
+            fp = (pred_flat * (1 - target_flat)).sum()
+            fn = ((1 - pred_flat) * target_flat).sum()
+
+            # Tversky index
+            alpha_c = self.alpha[c]
+            beta_c = self.beta[c]
+
+            tversky = (tp + self.smooth) / (tp + alpha_c * fn + beta_c * fp + self.smooth)
+
+            # Focal Tversky
+            focal_tversky = (1 - tversky) ** self.gamma
+
+            # Apply class weight
+            class_weight = self.class_weights[c]
+            total_loss += class_weight * focal_tversky
+
+        # Return average loss across classes
+        return total_loss / sum(self.class_weights)
 
 
 # ===========================

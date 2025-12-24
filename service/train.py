@@ -68,7 +68,7 @@ from tools.dataset.dataset_2d5_multiclass import (
 )
 
 # Import models and metrics from separate modules
-from service.models import SimpleUNet, DiceLoss, DiceBCELoss
+from service.models import SimpleUNet, DiceLoss, DiceBCELoss, FocalTverskyLoss
 from service.metrics import (
     compute_dice_score,
     compute_precision,
@@ -400,6 +400,7 @@ def validate_epoch(
     epoch=0,
     wandb_run=None,
     log_batch_every=10,
+    thr_sweep_every=1,
 ):
     """
     Validate for one epoch with batch-level logging
@@ -427,6 +428,10 @@ def validate_epoch(
     vis_masks_gt = None
     vis_masks_pred = None
 
+    # Accumulate all predictions and targets for threshold sweeping
+    all_probs = []  # Store sigmoid probabilities for threshold sweeping
+    all_targets = []  # Store ground truth masks for threshold sweeping
+
     # Reset MONAI metrics at start of validation
     if dice_metric is not None:
         dice_metric.reset()
@@ -441,7 +446,12 @@ def validate_epoch(
 
             outputs = model(images)
             loss = criterion(outputs, masks)
-            
+
+            # Store predictions and targets for threshold sweeping
+            probs = torch.sigmoid(outputs)  # Convert logits to probabilities
+            all_probs.append(probs.cpu())  # Move to CPU for accumulation
+            all_targets.append(masks.cpu())  # Move to CPU for accumulation
+
             # Compute precision/recall (custom implementation)
             precision = compute_precision(outputs, masks)
             recall = compute_recall(outputs, masks)
@@ -570,6 +580,150 @@ def validate_epoch(
     avg_precision_per_class = [p / max(num_batches, 1) for p in total_precision_per_class]
     avg_recall_per_class = [r / max(num_batches, 1) for r in total_recall_per_class]
 
+    # Threshold sweeping for Target1 and Target2 (classes 1 and 2)
+    threshold_sweep_results = {}
+    if thr_sweep_every > 0 and (epoch + 1) % thr_sweep_every == 0 and all_probs:
+        print("  Performing threshold sweep...")
+
+        # Concatenate all accumulated predictions and targets
+        all_probs_tensor = torch.cat(all_probs, dim=0)  # (N, 3, H, W)
+        all_targets_tensor = torch.cat(all_targets, dim=0)  # (N, 3, H, W)
+
+        # Thresholds to sweep
+        thresholds = [round(t, 2) for t in torch.arange(0.1, 0.95, 0.05).tolist()]
+
+        # Results for each target class
+        for target_class in [1, 2]:  # Target1 and Target2
+            class_name = f"target{target_class}"
+            print(f"    Sweeping {class_name}...")
+
+            threshold_results = []
+
+            for threshold in thresholds:
+                # Apply threshold to get binary predictions for this class
+                pred_binary = (all_probs_tensor[:, target_class] > threshold).float()
+
+                # Flatten predictions and targets for this class
+                pred_flat = pred_binary.reshape(-1)
+                target_flat = all_targets_tensor[:, target_class].reshape(-1)
+
+                # Compute TP, FP, FN
+                tp = (pred_flat * target_flat).sum().item()
+                fp = (pred_flat * (1 - target_flat)).sum().item()
+                fn = ((1 - pred_flat) * target_flat).sum().item()
+
+                # Compute precision, recall, dice
+                precision = tp / (tp + fp + 1e-8)
+                recall = tp / (tp + fn + 1e-8)
+                dice = 2 * tp / (2 * tp + fp + fn + 1e-8)
+
+                threshold_results.append({
+                    'threshold': threshold,
+                    'dice': dice,
+                    'precision': precision,
+                    'recall': recall,
+                    'tp': int(tp),
+                    'fp': int(fp),
+                    'fn': int(fn),
+                })
+
+            threshold_sweep_results[class_name] = threshold_results
+
+        # Find best thresholds (max Dice) for each target class
+        best_thresholds = {}
+        for target_class in [1, 2]:
+            class_name = f"target{target_class}"
+            results = threshold_sweep_results[class_name]
+            best_result = max(results, key=lambda x: x['dice'])
+            best_thresholds[class_name] = best_result
+
+        # Log to W&B if available
+        if wandb_run is not None:
+            try:
+                # Log tables
+                for target_class in [1, 2]:
+                    class_name = f"target{target_class}"
+                    results = threshold_sweep_results[class_name]
+
+                    # Create table data
+                    table_data = [[epoch + 1, r['threshold'], r['dice'], r['precision'], r['recall'], r['tp'], r['fp'], r['fn']]
+                                 for r in results]
+
+                    # Create wandb table
+                    table = wandb.Table(
+                        data=table_data,
+                        columns=["epoch", "threshold", "dice", "precision", "recall", "tp", "fp", "fn"]
+                    )
+
+                    # Log table
+                    wandb.log({f"val/threshold_sweep_{class_name}": table}, step=epoch)
+
+                # Log plots for each target class
+                for target_class in [1, 2]:
+                    class_name = f"target{target_class}"
+                    results = threshold_sweep_results[class_name]
+
+                    thresholds = [r['threshold'] for r in results]
+                    dice_scores = [r['dice'] for r in results]
+                    precisions = [r['precision'] for r in results]
+                    recalls = [r['recall'] for r in results]
+
+                    # Dice vs Threshold plot
+                    wandb.log({
+                        f"plots/{class_name}_dice_vs_thr": wandb.plot.line(
+                            wandb.Table(data=[[t, d] for t, d in zip(thresholds, dice_scores)],
+                                       columns=["threshold", "dice"]),
+                            "threshold", "dice",
+                            title=f"{class_name.upper()} Dice vs Threshold (Epoch {epoch+1})"
+                        )
+                    }, step=epoch)
+
+                    # Precision vs Threshold plot
+                    wandb.log({
+                        f"plots/{class_name}_precision_vs_thr": wandb.plot.line(
+                            wandb.Table(data=[[t, p] for t, p in zip(thresholds, precisions)],
+                                       columns=["threshold", "precision"]),
+                            "threshold", "precision",
+                            title=f"{class_name.upper()} Precision vs Threshold (Epoch {epoch+1})"
+                        )
+                    }, step=epoch)
+
+                    # Recall vs Threshold plot
+                    wandb.log({
+                        f"plots/{class_name}_recall_vs_thr": wandb.plot.line(
+                            wandb.Table(data=[[t, r] for t, r in zip(thresholds, recalls)],
+                                       columns=["threshold", "recall"]),
+                            "threshold", "recall",
+                            title=f"{class_name.upper()} Recall vs Threshold (Epoch {epoch+1})"
+                        )
+                    }, step=epoch)
+
+                    # Precision-Recall curve
+                    wandb.log({
+                        f"plots/{class_name}_precision_recall": wandb.plot.line(
+                            wandb.Table(data=[[r, p] for r, p in zip(recalls, precisions)],
+                                       columns=["recall", "precision"]),
+                            "recall", "precision",
+                            title=f"{class_name.upper()} Precision-Recall (Epoch {epoch+1})"
+                        )
+                    }, step=epoch)
+
+                # Log best threshold scalar metrics
+                for target_class in [1, 2]:
+                    class_name = f"target{target_class}"
+                    best = best_thresholds[class_name]
+                    wandb.log({
+                        f"val/best_thr_{class_name}": best['threshold'],
+                        f"val/best_dice_{class_name}": best['dice'],
+                        f"val/best_precision_{class_name}": best['precision'],
+                        f"val/best_recall_{class_name}": best['recall'],
+                    }, step=epoch)
+
+                print("  ✓ Logged threshold sweep results to W&B")
+
+            except Exception as e:
+                print(f"  ⚠️  Error logging threshold sweep to W&B: {e}")
+
     return avg_loss, avg_dice, avg_precision, avg_recall, avg_precision_per_class, avg_recall_per_class, per_class_dice_list, (vis_images, vis_masks_gt, vis_masks_pred)
 
 
@@ -658,8 +812,37 @@ def create_argument_parser():
         "--loss",
         type=str,
         default="dice_bce",
-        choices=["dice", "bce", "dice_bce"],
+        choices=["dice", "bce", "dice_bce", "focal_tversky"],
         help="Loss function",
+    )
+
+    # Focal Tversky loss arguments
+    parser.add_argument(
+        "--ft_gamma",
+        type=float,
+        default=1.33,
+        help="Focal Tversky gamma parameter",
+    )
+    parser.add_argument(
+        "--ft_alpha",
+        type=float,
+        nargs=3,
+        default=[0.6, 0.8, 0.8],
+        help="Focal Tversky alpha per class [prostate, target1, target2]",
+    )
+    parser.add_argument(
+        "--ft_beta",
+        type=float,
+        nargs=3,
+        default=[0.4, 0.2, 0.2],
+        help="Focal Tversky beta per class [prostate, target1, target2]",
+    )
+    parser.add_argument(
+        "--ft_class_weights",
+        type=float,
+        nargs=3,
+        default=[1.0, 2.0, 2.0],
+        help="Focal Tversky class weights [prostate, target1, target2]",
     )
 
     # Learning rate scheduler arguments
@@ -762,6 +945,12 @@ def create_argument_parser():
         type=int,
         default=4,
         help="Number of validation samples to visualize",
+    )
+    parser.add_argument(
+        "--thr_sweep_every",
+        type=int,
+        default=1,
+        help="Perform threshold sweep every N epochs (0 to disable)",
     )
 
     # Wandb arguments
@@ -912,6 +1101,13 @@ def main():
         criterion = DiceLoss()
     elif args.loss == "bce":
         criterion = nn.BCEWithLogitsLoss()
+    elif args.loss == "focal_tversky":
+        criterion = FocalTverskyLoss(
+            alpha=args.ft_alpha,
+            beta=args.ft_beta,
+            gamma=args.ft_gamma,
+            class_weights=args.ft_class_weights,
+        )
     else:  # dice_bce
         criterion = DiceBCELoss()
 
@@ -1010,6 +1206,11 @@ def main():
         "scheduler_max_lr_mult": (
             args.scheduler_max_lr_mult if args.scheduler == "onecycle" else None
         ),
+        # Focal Tversky loss params
+        "ft_gamma": args.ft_gamma if args.loss == "focal_tversky" else None,
+        "ft_alpha": args.ft_alpha if args.loss == "focal_tversky" else None,
+        "ft_beta": args.ft_beta if args.loss == "focal_tversky" else None,
+        "ft_class_weights": args.ft_class_weights if args.loss == "focal_tversky" else None,
     }
 
     # Initialize Aim logger
@@ -1197,6 +1398,7 @@ def main():
             epoch=epoch,
             wandb_run=wandb_run,
             log_batch_every=10,  # Log every 10 batches to wandb
+            thr_sweep_every=args.thr_sweep_every,
         )
         print(f"Val   - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}, Precision: {val_precision:.4f}, Recall: {val_recall:.4f}")
         print(f"      - Dice per class: Prostate={val_dice_per_class[0]:.4f}, Target1={val_dice_per_class[1]:.4f}, Target2={val_dice_per_class[2]:.4f}")

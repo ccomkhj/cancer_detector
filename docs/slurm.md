@@ -2,6 +2,10 @@
 
 This repo includes SLURM submission scripts in `scripts/` that support running training in a **Singularity/Apptainer container** with automatic dependency installation.
 
+**New Features:**
+- **Focal-Tversky Loss**: Advanced loss function for improved medical image segmentation
+- **Threshold Sweep Analysis**: Automatic optimal threshold finding for Target1/Target2 classes with W&B logging
+
 ## Quick Start
 
 ```bash
@@ -11,8 +15,8 @@ This repo includes SLURM submission scripts in `scripts/` that support running t
 # 2. Set wandb API key (optional)
 echo "WANDB_API_KEY=your_key" > .env
 
-# 3. Submit training job
-sbatch scripts/submit_slurm.sh --wandb --wandb_project myproject
+# 3. Submit training job with advanced features
+sbatch scripts/submit_slurm.sh --wandb --wandb_project myproject --loss focal_tversky
 ```
 
 **Tip:** Always use `--scratch` when building containers on HPC clusters to avoid home directory disk quota limits.
@@ -197,7 +201,94 @@ sbatch --account=ebrains-0000006 scripts/submit_slurm.sh
 
 # Override training parameters
 ./scripts/submit_slurm_wandb.sh --account=ebrains-0000006 --epochs 100 --batch_size 16
+
+# Use Focal-Tversky loss for improved segmentation
+./scripts/submit_slurm_wandb.sh --account=ebrains-0000006 --loss focal_tversky
+
+# Custom Focal-Tversky parameters
+./scripts/submit_slurm_wandb.sh --account=ebrains-0000006 --loss focal_tversky \
+    --ft_gamma 1.5 --ft_alpha 0.7 0.9 0.9 --ft_beta 0.3 0.1 0.1 \
+    --ft_class_weights 1.0 3.0 3.0
+
+# Enable threshold sweep for Target1/Target2 every epoch
+THR_SWEEP_EVERY=1 ./scripts/submit_slurm_wandb.sh --account=ebrains-0000006
+
+# Threshold sweep every 5 epochs (default)
+./scripts/submit_slurm_wandb.sh --account=ebrains-0000006 --thr_sweep_every 5
 ```
+
+## Advanced Features
+
+### Loss Functions
+
+The training script supports multiple loss functions optimized for medical image segmentation:
+
+#### Available Loss Functions
+
+- **`dice`**: Standard Dice Loss
+- **`bce`**: Binary Cross-Entropy Loss
+- **`dice_bce`** (default): Combined Dice + BCE Loss
+- **`focal_tversky`**: Focal-Tversky Loss for improved segmentation accuracy
+
+#### Focal-Tversky Loss
+
+The Focal-Tversky loss is specifically designed for medical image segmentation and provides better performance than traditional losses:
+
+**Formula:** `Focal-Tversky = (1 - Tversky)^γ`
+
+Where: `Tversky = (TP + smooth) / (TP + α×FN + β×FP + smooth)`
+
+**Default Parameters:**
+- **γ (gamma)**: 1.33 - Focal parameter that reduces loss for easy examples
+- **α/β per class**: Prostate (0.6/0.4), Target1 (0.8/0.2), Target2 (0.8/0.2)
+- **Class weights**: Prostate (1.0), Target1 (2.0), Target2 (2.0)
+
+**Benefits:**
+- Handles class imbalance better than Dice/BCE
+- Focuses on hard-to-segment regions
+- Per-class α/β parameters for fine-grained control
+- Configurable focal parameter and class weights
+
+```bash
+# Use with default Focal-Tversky parameters
+sbatch scripts/submit_slurm.sh --loss focal_tversky
+
+# Customize parameters for your dataset
+sbatch scripts/submit_slurm.sh --loss focal_tversky \
+    --ft_gamma 1.5 \
+    --ft_alpha 0.7 0.8 0.8 \
+    --ft_beta 0.3 0.2 0.2 \
+    --ft_class_weights 1.0 2.5 2.5
+```
+
+### Threshold Sweep Analysis
+
+The training script includes automatic threshold sweep analysis for Target1 and Target2 classes, which helps determine optimal classification thresholds for inference:
+
+**Features:**
+- Sweeps thresholds from 0.1 to 0.9 in 0.05 increments
+- Computes Dice, Precision, Recall, TP/FP/FN for each threshold
+- Finds best threshold per class by maximum Dice score
+- Logs comprehensive results to Weights & Biases
+
+**W&B Outputs:**
+- **Tables**: `val/threshold_sweep_target1`, `val/threshold_sweep_target2`
+- **Plots**: Dice vs Threshold, Precision vs Threshold, Recall vs Threshold, Precision-Recall curves
+- **Scalars**: Best threshold, best Dice/Precision/Recall per class
+
+**Configuration:**
+```bash
+# Enable threshold sweep every epoch (recommended for analysis)
+THR_SWEEP_EVERY=1 sbatch scripts/submit_slurm_wandb.sh
+
+# Sweep every 5 epochs (default, balances analysis with performance)
+THR_SWEEP_EVERY=5 sbatch scripts/submit_slurm_wandb.sh
+
+# Disable threshold sweep
+THR_SWEEP_EVERY=0 sbatch scripts/submit_slurm_wandb.sh
+```
+
+**Note:** Threshold sweep only runs during validation and adds minimal computational overhead when enabled.
 
 ### Cluster-Specific Options
 
@@ -261,6 +352,16 @@ scancel <jobid>
 - Set `DATA_DIR` environment variable to point to your data location
 - Or add to `.env` file: `echo "DATA_DIR=/path/to/data" >> .env`
 - Default HPC path: `/p/scratch/ebrains-0000006/kim27/MRI_2.5D_Segmentation/data`
+
+**Focal-Tversky loss parameters**
+- Ensure `--ft_alpha`, `--ft_beta`, and `--ft_class_weights` have exactly 3 values (one per class)
+- Prostate=class 0, Target1=class 1, Target2=class 2
+- Typical α values: 0.5-0.8, β values: 0.2-0.5, γ values: 1.0-2.0
+
+**Threshold sweep not appearing in W&B**
+- Ensure `THR_SWEEP_EVERY > 0` and current epoch meets the sweep frequency
+- Check that wandb logging is enabled with `--wandb` flag
+- Threshold sweep only runs during validation, not training
 
 **Container image not found**
 - The script automatically searches:
