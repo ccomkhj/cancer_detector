@@ -1,16 +1,15 @@
 """
-2.5D MRI Dataset with Multi-Class Segmentation (Prostate + Target1 + Target2)
+2.5D MRI Dataset with Multi-Class Segmentation (Prostate + Target)
 
 This dataset loads ALL masks together:
 - Images from data/processed/ (as in manifest.csv)
-- All masks from data/processed_seg/ (prostate, target1, target2)
+- All masks from data/processed_seg/ (prostate, target)
 
 Output format:
 - Image: (stack_depth, H, W)
 - Mask: (num_classes, H, W) where:
   - Channel 0: Prostate
-  - Channel 1: Target1
-  - Channel 2: Target2
+  - Channel 1: Target (combined Target1 + Target2)
 
 Usage:
     from dataset_2d5_multiclass import MRI25DMultiClassDataset, create_multiclass_dataloader
@@ -33,8 +32,8 @@ from torch.utils.data import Dataset, DataLoader
 class MRI25DMultiClassDataset(Dataset):
     """
     2.5D MRI Dataset with multi-class segmentation masks
-    
-    Loads ALL available masks (prostate, target1, target2) simultaneously
+
+    Loads ALL available masks (prostate, target) simultaneously
     """
     
     def __init__(
@@ -63,7 +62,7 @@ class MRI25DMultiClassDataset(Dataset):
         self.target_size = target_size
         
         # Mask types to load
-        self.mask_types = ['prostate', 'target1', 'target2']
+        self.mask_types = ['prostate', 'target']  # Combined target1 and target2
         
         if stack_depth % 2 == 0:
             raise ValueError(f"stack_depth must be odd, got {stack_depth}")
@@ -93,7 +92,7 @@ class MRI25DMultiClassDataset(Dataset):
         print(f"Loaded {len(self.valid_indices)} valid samples from {len(self.df)} total slices")
         print(f"  Class: {self.class_name}")
         print(f"  Stack depth: {self.stack_depth}")
-        print(f"  Multi-class: {', '.join(self.mask_types)}")
+        print(f"  Multi-class: {', '.join(self.mask_types)} (target = target1 + target2)")
     
     def _build_valid_indices(self) -> List[Tuple[int, int, str]]:
         """Build list of valid (case_id, series_uid, slice_idx) tuples."""
@@ -183,8 +182,7 @@ class MRI25DMultiClassDataset(Dataset):
             image: Tensor of shape (stack_depth, H, W)
             mask: Tensor of shape (num_classes, H, W) where each channel is a binary mask
                   Channel 0: Prostate
-                  Channel 1: Target1
-                  Channel 2: Target2
+                  Channel 1: Target (combined Target1 + Target2)
         """
         case_id, series_uid, center_slice = self.valid_indices[idx]
         
@@ -216,21 +214,41 @@ class MRI25DMultiClassDataset(Dataset):
         # Create multi-class mask: (num_classes, H, W)
         mask_channels = []
         for mask_type in self.mask_types:
-            mask_dir = series_dir / mask_type
-            mask_path = mask_dir / f"{center_slice:04d}.png"
-            
-            mask = self._load_mask(mask_path)
-            
-            if mask is None:
-                # Create empty mask if this type doesn't exist
-                if len(mask_channels) > 0:
-                    mask = np.zeros_like(mask_channels[0])
+            if mask_type == 'target':
+                # Combine target1 and target2 masks
+                target1_dir = series_dir / 'target1'
+                target2_dir = series_dir / 'target2'
+                target1_path = target1_dir / f"{center_slice:04d}.png"
+                target2_path = target2_dir / f"{center_slice:04d}.png"
+
+                target1_mask = self._load_mask(target1_path)
+                target2_mask = self._load_mask(target2_path)
+
+                # Combine masks (logical OR)
+                if target1_mask is not None and target2_mask is not None:
+                    combined_mask = np.logical_or(target1_mask, target2_mask).astype(np.float32)
+                elif target1_mask is not None:
+                    combined_mask = target1_mask
+                elif target2_mask is not None:
+                    combined_mask = target2_mask
                 else:
-                    # Use image shape
+                    # Use image shape for empty mask
+                    combined_mask = np.zeros((image_stack.shape[1], image_stack.shape[2]), dtype=np.float32)
+
+                mask_channels.append(combined_mask)
+            else:
+                # Load prostate mask
+                mask_dir = series_dir / mask_type
+                mask_path = mask_dir / f"{center_slice:04d}.png"
+
+                mask = self._load_mask(mask_path)
+
+                if mask is None:
+                    # Create empty mask if this type doesn't exist
                     mask = np.zeros((image_stack.shape[1], image_stack.shape[2]), dtype=np.float32)
-            
-            mask_channels.append(mask)
-        
+
+                mask_channels.append(mask)
+
         # Stack masks: (num_classes, H, W)
         mask_stack = np.stack(mask_channels, axis=0)
         
@@ -321,7 +339,7 @@ if __name__ == "__main__":
         print(f"  Mask shape: {mask.shape}")
         
         # Check each mask channel
-        for i, mask_type in enumerate(['Prostate', 'Target1', 'Target2']):
+        for i, mask_type in enumerate(['Prostate', 'Target']):
             mask_ch = mask[i]
             coverage = (mask_ch > 0).float().mean() * 100
             print(f"  {mask_type}: {coverage:.1f}% coverage")
@@ -345,7 +363,7 @@ if __name__ == "__main__":
         # Show combined overlay
         axes[0, 3].imshow(image[2], cmap='gray')
         # Overlay all masks with different colors
-        colors = [(1, 1, 0), (1, 0, 0), (1, 0.5, 0)]  # Yellow, Red, Orange
+        colors = [(1, 0, 0), (0, 1, 0)]  # Red, Green
         for i, color in enumerate(colors):
             if mask[i].max() > 0:
                 mask_rgba = np.zeros((*mask[i].shape, 4))
@@ -356,25 +374,16 @@ if __name__ == "__main__":
                 axes[0, 3].imshow(mask_rgba)
         axes[0, 3].set_title("All Masks")
         axes[0, 3].axis('off')
-        
+
         # Show individual masks
-        mask_names = ['Prostate', 'Target1', 'Target2']
-        for i in range(3):
+        mask_names = ['Prostate', 'Target']
+        for i in range(2):
             axes[1, i].imshow(mask[i], cmap='gray')
             axes[1, i].set_title(f"{mask_names[i]} Mask")
             axes[1, i].axis('off')
-        
-        # Show overlay again
-        axes[1, 3].imshow(image[2], cmap='gray')
-        for i, color in enumerate(colors):
-            if mask[i].max() > 0:
-                mask_rgba = np.zeros((*mask[i].shape, 4))
-                mask_rgba[..., 0] = color[0]
-                mask_rgba[..., 1] = color[1]
-                mask_rgba[..., 2] = color[2]
-                mask_rgba[..., 3] = 0.5 * mask[i].numpy()
-                axes[1, 3].imshow(mask_rgba)
-        axes[1, 3].set_title("Overlay")
+
+        # Hide unused subplots
+        axes[1, 2].axis('off')
         axes[1, 3].axis('off')
         
         plt.tight_layout()

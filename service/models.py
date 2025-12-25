@@ -61,15 +61,15 @@ class FocalTverskyLoss(nn.Module):
     Tversky = (TP + smooth) / (TP + α*FN + β*FP + smooth)
 
     Args:
-        alpha: List of α values per class [prostate, target1, target2]
-        beta: List of β values per class [prostate, target1, target2]
+        alpha: List of α values per class [prostate, target]
+        beta: List of β values per class [prostate, target]
         gamma: Focal parameter γ
-        class_weights: List of class weights [prostate, target1, target2]
+        class_weights: List of class weights [prostate, target]
         smooth: Smoothing constant
     """
 
-    def __init__(self, alpha=[0.6, 0.8, 0.8], beta=[0.4, 0.2, 0.2], gamma=1.33,
-                 class_weights=[1.0, 2.0, 2.0], smooth=1e-6):
+    def __init__(self, alpha=[0.6, 0.8], beta=[0.4, 0.2], gamma=1.33,
+                 class_weights=[1.0, 2.0], smooth=1e-6):
         super().__init__()
         self.alpha = alpha
         self.beta = beta
@@ -80,7 +80,7 @@ class FocalTverskyLoss(nn.Module):
     def forward(self, pred_logits, target):
         """
         Args:
-            pred_logits: (B, C, H, W) - raw logits, C=3 for [prostate, target1, target2]
+            pred_logits: (B, C, H, W) - raw logits, C=2 for [prostate, target]
             target: (B, C, H, W) - binary masks
         Returns:
             loss: Scalar loss value
@@ -132,8 +132,8 @@ class SimpleUNet(nn.Module):
     """Simple 2.5D U-Net for multi-class segmentation"""
 
     def __init__(
-        self, in_channels=5, out_channels=3
-    ):  # 3 classes: prostate, target1, target2
+        self, in_channels=5, out_channels=2
+    ):  # 2 classes: prostate, target
         super().__init__()
 
         # Encoder

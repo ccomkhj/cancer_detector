@@ -8,8 +8,7 @@ This training script trains on ALL masks simultaneously:
 
 Output: Multi-class segmentation model
   - Class 0: Prostate (Red)
-  - Class 1: Target1 (Green)
-  - Class 2: Target2 (Blue)
+  - Class 1: Target (Green) [combined Target1 + Target2]
 
 Features:
   - Advanced learning rate schedulers (OneCycle, Cosine, ReduceLROnPlateau, etc.)
@@ -204,11 +203,10 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
     # Class colors (RGB)
     colors = {
         0: [1.0, 0.0, 0.0],  # Prostate - Red
-        1: [0.0, 1.0, 0.0],  # Target1 - Green
-        2: [0.0, 0.0, 1.0],  # Target2 - Blue
+        1: [0.0, 1.0, 0.0],  # Target - Green (combined Target1 + Target2)
     }
 
-    class_names = ["Prostate", "Target1", "Target2"]
+    class_names = ["Prostate", "Target"]
 
     visualizations = {}
 
@@ -243,7 +241,7 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
         # Individual GT masks
         axes[0, 2].imshow(img, cmap="gray")
         axes[0, 2].set_title("GT Classes", fontsize=12, fontweight="bold")
-        for c in range(3):
+        for c in range(2):
             if gt[c].max() > 0:
                 axes[0, 2].contour(
                     gt[c], levels=[0.5], colors=[colors[c]], linewidths=2
@@ -270,7 +268,7 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
         # Individual prediction masks
         axes[1, 2].imshow(img, cmap="gray")
         axes[1, 2].set_title("Pred Classes", fontsize=12, fontweight="bold")
-        for c in range(3):
+        for c in range(2):
             if pred_binary[c].max() > 0:
                 axes[1, 2].contour(
                     pred_binary[c], levels=[0.5], colors=[colors[c]], linewidths=2
@@ -279,7 +277,7 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
 
         # Add legend
         legend_elements = [
-            mpatches.Patch(color=colors[i], label=class_names[i]) for i in range(3)
+            mpatches.Patch(color=colors[i], label=class_names[i]) for i in range(2)
         ]
         fig.legend(
             handles=legend_elements,
@@ -318,6 +316,10 @@ def train_epoch(
     model.train()
     total_loss = 0
     total_dice = 0
+    # Per-class accumulators
+    total_dice_per_class = [0.0, 0.0]  # [prostate, target]
+    total_precision_per_class = [0.0, 0.0]  # [prostate, target]
+    total_recall_per_class = [0.0, 0.0]  # [prostate, target]
     num_batches = 0
 
     pbar = tqdm(dataloader, desc="Training")
@@ -342,8 +344,32 @@ def train_epoch(
         # Compute metrics
         dice = compute_dice_score(outputs, masks)
 
+        # Compute per-class metrics for training
+        pred = torch.sigmoid(outputs)
+        # Use configurable threshold (could be made class-specific in future)
+        threshold = 0.5
+        pred_binary = (pred > threshold).float()
+
+        # Compute per-class dice
+        dice_per_class = []
+        for c in range(2):  # 2 classes: prostate, target
+            pred_c = pred_binary[:, c].reshape(-1)
+            target_c = masks[:, c].reshape(-1)
+            intersection = (pred_c * target_c).sum()
+            dice_c = (2.0 * intersection) / (pred_c.sum() + target_c.sum() + 1e-8)
+            dice_per_class.append(dice_c.item())
+
+        # Get per-class precision and recall
+        precision_per_class = compute_precision(outputs, masks, return_per_class=True)
+        recall_per_class = compute_recall(outputs, masks, return_per_class=True)
+
         total_loss += loss.item()
         total_dice += dice
+        # Accumulate per-class metrics
+        for c in range(2):
+            total_dice_per_class[c] += dice_per_class[c]
+            total_precision_per_class[c] += precision_per_class[c]
+            total_recall_per_class[c] += recall_per_class[c]
         num_batches += 1
 
         current_lr = get_current_lr(optimizer)
@@ -358,32 +384,44 @@ def train_epoch(
         # Log batch-level metrics
         if logger is not None:
             global_step = epoch * len(dataloader) + batch_idx
-            logger.log_metrics(
-                {
-                    "batch_loss": loss.item(),
-                    "batch_dice": dice,
-                    "learning_rate": current_lr,
-                },
-                step=global_step,
-                context="train_batch",
-            )
-        
+            batch_metrics = {
+                "batch_loss": loss.item(),
+                "batch_dice": dice,
+                "learning_rate": current_lr,
+            }
+            # Add per-class metrics
+            class_names = ["prostate", "target"]
+            for c, name in enumerate(class_names):
+                batch_metrics[f"batch_dice_{name}"] = dice_per_class[c]
+                batch_metrics[f"batch_precision_{name}"] = precision_per_class[c]
+                batch_metrics[f"batch_recall_{name}"] = recall_per_class[c]
+
+            logger.log_metrics(batch_metrics, step=global_step, context="train_batch")
+
         # Log batch-level metrics to wandb (every N batches to reduce overhead)
         if wandb_run is not None and batch_idx % log_batch_every == 0:
             global_step = epoch * len(dataloader) + batch_idx
-            wandb.log(
-                {
-                    "train/batch_loss": loss.item(),
-                    "train/batch_dice": dice,
-                    "learning_rate": current_lr,
-                },
-                step=global_step,
-            )
+            wandb_metrics = {
+                "train/batch_loss": loss.item(),
+                "train/batch_dice": dice,
+                "learning_rate": current_lr,
+            }
+            # Add per-class metrics
+            class_names = ["prostate", "target"]
+            for c, name in enumerate(class_names):
+                wandb_metrics[f"train/batch_dice_{name}"] = dice_per_class[c]
+                wandb_metrics[f"train/batch_precision_{name}"] = precision_per_class[c]
+                wandb_metrics[f"train/batch_recall_{name}"] = recall_per_class[c]
+
+            wandb.log(wandb_metrics, step=global_step)
 
     avg_loss = total_loss / max(num_batches, 1)
     avg_dice = total_dice / max(num_batches, 1)
+    avg_dice_per_class = [d / max(num_batches, 1) for d in total_dice_per_class]
+    avg_precision_per_class = [p / max(num_batches, 1) for p in total_precision_per_class]
+    avg_recall_per_class = [r / max(num_batches, 1) for r in total_recall_per_class]
 
-    return avg_loss, avg_dice
+    return avg_loss, avg_dice, avg_dice_per_class, avg_precision_per_class, avg_recall_per_class
 
 
 def validate_epoch(
@@ -416,11 +454,11 @@ def validate_epoch(
     total_precision = 0
     total_recall = 0
     # Per-class accumulators
-    total_precision_per_class = [0.0, 0.0, 0.0]  # [prostate, target1, target2]
-    total_recall_per_class = [0.0, 0.0, 0.0]  # [prostate, target1, target2]
+    total_precision_per_class = [0.0, 0.0]  # [prostate, target]
+    total_recall_per_class = [0.0, 0.0]  # [prostate, target]
     # Dice accumulators (for fallback when MONAI not available)
     total_dice = 0.0
-    total_dice_per_class = [0.0, 0.0, 0.0]  # [prostate, target1, target2]
+    total_dice_per_class = [0.0, 0.0]  # [prostate, target]
     num_batches = 0
 
     # Store first batch for visualization
@@ -489,7 +527,7 @@ def validate_epoch(
                 # Also compute per-class Dice for fallback
                 pred = torch.sigmoid(outputs)
                 pred = (pred > 0.5).float()
-                for c in range(3):
+                for c in range(2):
                     pred_c = pred[:, c].reshape(-1)
                     target_c = masks[:, c].reshape(-1)
                     intersection = (pred_c * target_c).sum()
@@ -500,7 +538,7 @@ def validate_epoch(
             total_loss += loss.item()
             total_precision += precision
             total_recall += recall
-            for c in range(3):
+            for c in range(2):
                 total_precision_per_class[c] += precision_per_class[c]
                 total_recall_per_class[c] += recall_per_class[c]
             num_batches += 1
@@ -522,7 +560,7 @@ def validate_epoch(
                     "batch_recall": recall,
                 }
                 # Add per-class metrics
-                class_names = ["prostate", "target1", "target2"]
+                class_names = ["prostate", "target"]
                 for c, name in enumerate(class_names):
                     batch_metrics[f"batch_precision_{name}"] = precision_per_class[c]
                     batch_metrics[f"batch_recall_{name}"] = recall_per_class[c]
@@ -542,7 +580,7 @@ def validate_epoch(
                     "val/batch_recall": recall,
                 }
                 # Add per-class metrics
-                class_names = ["prostate", "target1", "target2"]
+                class_names = ["prostate", "target"]
                 for c, name in enumerate(class_names):
                     wandb_metrics[f"val/batch_precision_{name}"] = precision_per_class[c]
                     wandb_metrics[f"val/batch_recall_{name}"] = recall_per_class[c]
@@ -572,7 +610,7 @@ def validate_epoch(
     else:
         # Fallback: use accumulated batch-averaged Dice
         avg_dice = total_dice / max(num_batches, 1) if num_batches > 0 else 0.0
-        per_class_dice_list = [d / max(num_batches, 1) for d in total_dice_per_class] if num_batches > 0 else [0.0, 0.0, 0.0]
+        per_class_dice_list = [d / max(num_batches, 1) for d in total_dice_per_class] if num_batches > 0 else [0.0, 0.0]
 
     avg_loss = total_loss / max(num_batches, 1)
     avg_precision = total_precision / max(num_batches, 1)
@@ -592,9 +630,9 @@ def validate_epoch(
         # Thresholds to sweep
         thresholds = [round(t, 2) for t in torch.arange(0.1, 0.95, 0.05).tolist()]
 
-        # Results for each target class
-        for target_class in [1, 2]:  # Target1 and Target2
-            class_name = f"target{target_class}"
+        # Results for the target class
+        for target_class in [1]:  # Target (combined Target1 + Target2)
+            class_name = "target"
             print(f"    Sweeping {class_name}...")
 
             threshold_results = []
@@ -629,10 +667,10 @@ def validate_epoch(
 
             threshold_sweep_results[class_name] = threshold_results
 
-        # Find best thresholds (max Dice) for each target class
+        # Find best threshold (max Dice) for the target class
         best_thresholds = {}
-        for target_class in [1, 2]:
-            class_name = f"target{target_class}"
+        for target_class in [1]:
+            class_name = "target"
             results = threshold_sweep_results[class_name]
             best_result = max(results, key=lambda x: x['dice'])
             best_thresholds[class_name] = best_result
@@ -641,26 +679,28 @@ def validate_epoch(
         if wandb_run is not None:
             try:
                 # Log tables
-                for target_class in [1, 2]:
-                    class_name = f"target{target_class}"
+                for target_class in [1]:
+                    class_name = "target"
                     results = threshold_sweep_results[class_name]
 
-                    # Create table data
-                    table_data = [[epoch + 1, r['threshold'], r['dice'], r['precision'], r['recall'], r['tp'], r['fp'], r['fn']]
-                                 for r in results]
+                    # Only log threshold sweep table every 5 epochs to reduce cache size
+                    if (epoch + 1) % 5 == 0:
+                        # Create table data
+                        table_data = [[epoch + 1, r['threshold'], r['dice'], r['precision'], r['recall'], r['tp'], r['fp'], r['fn']]
+                                     for r in results]
 
-                    # Create wandb table
-                    table = wandb.Table(
-                        data=table_data,
-                        columns=["epoch", "threshold", "dice", "precision", "recall", "tp", "fp", "fn"]
-                    )
+                        # Create wandb table
+                        table = wandb.Table(
+                            data=table_data,
+                            columns=["epoch", "threshold", "dice", "precision", "recall", "tp", "fp", "fn"]
+                        )
 
-                    # Log table
-                    wandb.log({f"val/threshold_sweep_{class_name}": table}, step=epoch)
+                        # Log table
+                        wandb.log({f"val/threshold_sweep_{class_name}": table}, step=epoch)
 
-                # Log plots for each target class
-                for target_class in [1, 2]:
-                    class_name = f"target{target_class}"
+                # Log plots for the target class
+                for target_class in [1]:
+                    class_name = "target"
                     results = threshold_sweep_results[class_name]
 
                     thresholds = [r['threshold'] for r in results]
@@ -668,49 +708,51 @@ def validate_epoch(
                     precisions = [r['precision'] for r in results]
                     recalls = [r['recall'] for r in results]
 
-                    # Dice vs Threshold plot
-                    wandb.log({
-                        f"plots/{class_name}_dice_vs_thr": wandb.plot.line(
-                            wandb.Table(data=[[t, d] for t, d in zip(thresholds, dice_scores)],
-                                       columns=["threshold", "dice"]),
-                            "threshold", "dice",
-                            title=f"{class_name.upper()} Dice vs Threshold (Epoch {epoch+1})"
-                        )
-                    }, step=epoch)
+                    # Only create plots every 10 epochs to reduce cache size
+                    if (epoch + 1) % 10 == 0:
+                        # Dice vs Threshold plot
+                        wandb.log({
+                            f"plots/{class_name}_dice_vs_thr": wandb.plot.line(
+                                wandb.Table(data=[[t, d] for t, d in zip(thresholds, dice_scores)],
+                                           columns=["threshold", "dice"]),
+                                "threshold", "dice",
+                                title=f"Target Dice vs Threshold (Epoch {epoch+1})"
+                            )
+                        }, step=epoch)
 
-                    # Precision vs Threshold plot
-                    wandb.log({
-                        f"plots/{class_name}_precision_vs_thr": wandb.plot.line(
-                            wandb.Table(data=[[t, p] for t, p in zip(thresholds, precisions)],
-                                       columns=["threshold", "precision"]),
-                            "threshold", "precision",
-                            title=f"{class_name.upper()} Precision vs Threshold (Epoch {epoch+1})"
-                        )
-                    }, step=epoch)
+                        # Precision vs Threshold plot
+                        wandb.log({
+                            f"plots/{class_name}_precision_vs_thr": wandb.plot.line(
+                                wandb.Table(data=[[t, p] for t, p in zip(thresholds, precisions)],
+                                           columns=["threshold", "precision"]),
+                                "threshold", "precision",
+                                title=f"Target Precision vs Threshold (Epoch {epoch+1})"
+                            )
+                        }, step=epoch)
 
-                    # Recall vs Threshold plot
-                    wandb.log({
-                        f"plots/{class_name}_recall_vs_thr": wandb.plot.line(
-                            wandb.Table(data=[[t, r] for t, r in zip(thresholds, recalls)],
-                                       columns=["threshold", "recall"]),
-                            "threshold", "recall",
-                            title=f"{class_name.upper()} Recall vs Threshold (Epoch {epoch+1})"
-                        )
-                    }, step=epoch)
+                        # Recall vs Threshold plot
+                        wandb.log({
+                            f"plots/{class_name}_recall_vs_thr": wandb.plot.line(
+                                wandb.Table(data=[[t, r] for t, r in zip(thresholds, recalls)],
+                                           columns=["threshold", "recall"]),
+                                "threshold", "recall",
+                                title=f"Target Recall vs Threshold (Epoch {epoch+1})"
+                            )
+                        }, step=epoch)
 
-                    # Precision-Recall curve
-                    wandb.log({
-                        f"plots/{class_name}_precision_recall": wandb.plot.line(
-                            wandb.Table(data=[[r, p] for r, p in zip(recalls, precisions)],
-                                       columns=["recall", "precision"]),
-                            "recall", "precision",
-                            title=f"{class_name.upper()} Precision-Recall (Epoch {epoch+1})"
-                        )
-                    }, step=epoch)
+                        # Precision-Recall curve
+                        wandb.log({
+                            f"plots/{class_name}_precision_recall": wandb.plot.line(
+                                wandb.Table(data=[[r, p] for r, p in zip(recalls, precisions)],
+                                           columns=["recall", "precision"]),
+                                "recall", "precision",
+                                title=f"Target Precision-Recall (Epoch {epoch+1})"
+                            )
+                        }, step=epoch)
 
                 # Log best threshold scalar metrics
-                for target_class in [1, 2]:
-                    class_name = f"target{target_class}"
+                for target_class in [1]:
+                    class_name = "target"
                     best = best_thresholds[class_name]
                     wandb.log({
                         f"val/best_thr_{class_name}": best['threshold'],
@@ -826,23 +868,23 @@ def create_argument_parser():
     parser.add_argument(
         "--ft_alpha",
         type=float,
-        nargs=3,
-        default=[0.6, 0.8, 0.8],
-        help="Focal Tversky alpha per class [prostate, target1, target2]",
+        nargs=2,
+        default=[0.6, 0.8],
+        help="Focal Tversky alpha per class [prostate, target]",
     )
     parser.add_argument(
         "--ft_beta",
         type=float,
-        nargs=3,
-        default=[0.4, 0.2, 0.2],
-        help="Focal Tversky beta per class [prostate, target1, target2]",
+        nargs=2,
+        default=[0.4, 0.2],
+        help="Focal Tversky beta per class [prostate, target]",
     )
     parser.add_argument(
         "--ft_class_weights",
         type=float,
-        nargs=3,
-        default=[1.0, 2.0, 2.0],
-        help="Focal Tversky class weights [prostate, target1, target2]",
+        nargs=2,
+        default=[1.0, 2.0],
+        help="Focal Tversky class weights [prostate, target]",
     )
 
     # Learning rate scheduler arguments
@@ -1089,7 +1131,7 @@ def main():
 
     # Create model
     print("Creating model...")
-    model = SimpleUNet(in_channels=args.stack_depth, out_channels=3)  # 3 classes
+    model = SimpleUNet(in_channels=args.stack_depth, out_channels=2)  # 2 classes: prostate, target
     model = model.to(device)
 
     # Count parameters
@@ -1102,6 +1144,17 @@ def main():
     elif args.loss == "bce":
         criterion = nn.BCEWithLogitsLoss()
     elif args.loss == "focal_tversky":
+        # Ensure FocalTversky parameters match the 2-class setup
+        if len(args.ft_alpha) != 2:
+            print(f"Warning: ft_alpha has {len(args.ft_alpha)} values, expected 2 for 2-class setup. Using first 2 values.")
+            args.ft_alpha = args.ft_alpha[:2]
+        if len(args.ft_beta) != 2:
+            print(f"Warning: ft_beta has {len(args.ft_beta)} values, expected 2 for 2-class setup. Using first 2 values.")
+            args.ft_beta = args.ft_beta[:2]
+        if len(args.ft_class_weights) != 2:
+            print(f"Warning: ft_class_weights has {len(args.ft_class_weights)} values, expected 2 for 2-class setup. Using first 2 values.")
+            args.ft_class_weights = args.ft_class_weights[:2]
+
         criterion = FocalTverskyLoss(
             alpha=args.ft_alpha,
             beta=args.ft_beta,
@@ -1138,10 +1191,11 @@ def main():
 
     # Get job_id early (used for checkpoint paths and wandb run name)
     job_id = os.environ.get("SLURM_JOB_ID", "local")
-    
+
     # Resume from checkpoint
     start_epoch = 0
     best_dice = 0.0
+    best_checkpoint_path = None  # Track the best checkpoint for final artifact
 
     if args.resume:
         resume_path = Path(args.resume)
@@ -1253,7 +1307,7 @@ def main():
                         print(f"⚠️  Weave initialization failed (non-critical): {weave_error}")
 
                 # Initialize wandb run - use job_id as run name
-                wandb_run_name = job_id  # Use job_id as run name
+                wandb_run_name = f"{job_id}_{datetime.now().strftime("%m%d_%H%M")}"  # Use job_id as run name
                 
                 # Add git commit to hyperparams if available
                 git_commit = get_git_commit_hash()
@@ -1332,7 +1386,7 @@ def main():
 
     # Initialize MONAI metrics for validation
     print("Initializing metrics...")
-    dice_metric, dice_metric_per_class, post_pred, post_label = initialize_monai_metrics(num_classes=3)
+    dice_metric, dice_metric_per_class, post_pred, post_label = initialize_monai_metrics(num_classes=2)
     
     if dice_metric is not None:
         print("  ✓ MONAI DiceMetric initialized (mean and per-class)")
@@ -1348,7 +1402,7 @@ def main():
         print("-" * 80)
 
         # Train
-        train_loss, train_dice = train_epoch(
+        train_loss, train_dice, train_dice_per_class, train_precision_per_class, train_recall_per_class = train_epoch(
             model,
             train_loader,
             criterion,
@@ -1364,23 +1418,33 @@ def main():
         print(f"Train - Loss: {train_loss:.4f}, Dice: {train_dice:.4f}")
 
         # Log epoch-level training metrics
-        logger.log_metrics(
-            {"loss": train_loss, "dice": train_dice, "learning_rate": current_lr},
-            step=epoch,
-            context="train",
-        )
+        train_metrics = {
+            "loss": train_loss,
+            "dice": train_dice,
+            "learning_rate": current_lr,
+        }
+        # Add per-class metrics
+        class_names = ["prostate", "target"]
+        for c, name in enumerate(class_names):
+            train_metrics[f"dice_{name}"] = train_dice_per_class[c]
+            train_metrics[f"precision_{name}"] = train_precision_per_class[c]
+            train_metrics[f"recall_{name}"] = train_recall_per_class[c]
+        logger.log_metrics(train_metrics, step=epoch, context="train")
 
         # Log to wandb
         if wandb_run is not None:
-            wandb.log(
-                {
-                    "train/loss": train_loss,
-                    "train/dice": train_dice,
-                    "learning_rate": current_lr,
-                    "epoch": epoch,
-                },
-                step=epoch,
-            )
+            wandb_metrics = {
+                "train/loss": train_loss,
+                "train/dice": train_dice,
+                "learning_rate": current_lr,
+                "epoch": epoch,
+            }
+            # Add per-class metrics
+            for c, name in enumerate(class_names):
+                wandb_metrics[f"train/dice_{name}"] = train_dice_per_class[c]
+                wandb_metrics[f"train/precision_{name}"] = train_precision_per_class[c]
+                wandb_metrics[f"train/recall_{name}"] = train_recall_per_class[c]
+            wandb.log(wandb_metrics, step=epoch)
 
         # Validate
         should_visualize = (epoch + 1) % args.vis_every == 0 or epoch == start_epoch
@@ -1401,9 +1465,9 @@ def main():
             thr_sweep_every=args.thr_sweep_every,
         )
         print(f"Val   - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}, Precision: {val_precision:.4f}, Recall: {val_recall:.4f}")
-        print(f"      - Dice per class: Prostate={val_dice_per_class[0]:.4f}, Target1={val_dice_per_class[1]:.4f}, Target2={val_dice_per_class[2]:.4f}")
-        print(f"      - Precision per class: Prostate={val_precision_per_class[0]:.4f}, Target1={val_precision_per_class[1]:.4f}, Target2={val_precision_per_class[2]:.4f}")
-        print(f"      - Recall per class: Prostate={val_recall_per_class[0]:.4f}, Target1={val_recall_per_class[1]:.4f}, Target2={val_recall_per_class[2]:.4f}")
+        print(f"      - Dice per class: Prostate={val_dice_per_class[0]:.4f}, Target={val_dice_per_class[1]:.4f}")
+        print(f"      - Precision per class: Prostate={val_precision_per_class[0]:.4f}, Target={val_precision_per_class[1]:.4f}")
+        print(f"      - Recall per class: Prostate={val_recall_per_class[0]:.4f}, Target={val_recall_per_class[1]:.4f}")
 
         # Log epoch-level validation metrics
         val_metrics = {
@@ -1413,7 +1477,7 @@ def main():
             "recall": val_recall,
         }
         # Add per-class metrics
-        class_names = ["prostate", "target1", "target2"]
+        class_names = ["prostate", "target"]
         for c, name in enumerate(class_names):
             val_metrics[f"dice_{name}"] = val_dice_per_class[c]
             val_metrics[f"precision_{name}"] = val_precision_per_class[c]
@@ -1526,7 +1590,7 @@ def main():
                 "train_dice": train_dice,
                 "val_loss": val_loss,
                 "val_dice": val_dice,
-                "val_dice_per_class": val_dice_per_class,
+                "val_dice_per_class": val_dice_per_class,  # [prostate, target]
                 "val_precision": val_precision,
                 "val_recall": val_recall,
                 "val_precision_per_class": val_precision_per_class,
@@ -1570,7 +1634,7 @@ def main():
                 "val_recall": val_recall,
             }
             # Add per-class metrics
-            class_names = ["prostate", "target1", "target2"]
+            class_names = ["prostate", "target"]
             for c, name in enumerate(class_names):
                 best_model_metrics[f"val_dice_{name}"] = val_dice_per_class[c]
                 best_model_metrics[f"val_precision_{name}"] = val_precision_per_class[c]
@@ -1584,25 +1648,29 @@ def main():
                 wandb.run.summary["best_val_precision"] = val_precision
                 wandb.run.summary["best_val_recall"] = val_recall
                 # Add per-class metrics
-                for c, name in enumerate(class_names):
+                for c, name in enumerate(class_names):  # class_names is ["prostate", "target"]
                     wandb.run.summary[f"best_val_dice_{name}"] = val_dice_per_class[c]
                     wandb.run.summary[f"best_val_precision_{name}"] = val_precision_per_class[c]
                     wandb.run.summary[f"best_val_recall_{name}"] = val_recall_per_class[c]
                 wandb.run.summary["best_epoch"] = epoch + 1
-                # Save model artifact to wandb (works in offline mode)
-                try:
-                    artifact = wandb.Artifact(
-                        name=f"model-best",
-                        type="model",
-                        description=f"Best model at epoch {epoch+1} with val_dice={val_dice:.4f}",
-                    )
-                    artifact.add_file(str(checkpoint_path))
-                    wandb_run.log_artifact(artifact)
-                except Exception as artifact_error:
-                    # Artifact logging may fail in offline mode, but that's okay
-                    print(f"⚠️  Could not log artifact (non-critical): {artifact_error}")
+                # Store the best checkpoint path for final artifact logging
+                best_checkpoint_path = checkpoint_path
 
         print()
+
+    # Save final best model artifact to wandb (only once at the end)
+    if wandb_run is not None and best_checkpoint_path is not None:
+        try:
+            artifact = wandb.Artifact(
+                name=f"model-best-{job_id}",
+                type="model",
+                description=f"Best model from job {job_id} with final val_dice={best_dice:.4f}",
+            )
+            artifact.add_file(str(best_checkpoint_path))
+            wandb_run.log_artifact(artifact)
+            print(f"✓ Saved final best model artifact: {best_checkpoint_path}")
+        except Exception as artifact_error:
+            print(f"⚠️  Could not log final model artifact (non-critical): {artifact_error}")
 
     # Close logger
     logger.close()

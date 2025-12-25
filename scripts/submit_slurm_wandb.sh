@@ -133,11 +133,16 @@ fi
 # Only match known sbatch options, not all --* arguments (to allow training args like --scheduler, --lr, etc.)
 SBATCH_OPTS=""
 SCRIPT_ARGS=""
+HAS_CONFIG=0
 HAS_OUTPUT_DIR=0
 for arg in "$@"; do
     case "$arg" in
         --account=*|--partition=*|--time=*|--mem=*|--nodes=*|--ntasks=*|--cpus-per-task=*|--gres=*|--job-name=*|--output=*|--error=*|--chdir=*|--export=*|--export-file=*|--array=*|--begin=*|--dependency=*|--deadline=*|--delay-boot=*|--cpu-freq=*|--comment=*|-A*|-p*|-t*|-c*|-d*|-D*|-e*|-o*|-J*|-N*|-n*|-w*)
             SBATCH_OPTS="${SBATCH_OPTS} $arg"
+            ;;
+        --config|--config=*)
+            HAS_CONFIG=1
+            SCRIPT_ARGS="${SCRIPT_ARGS} $arg"
             ;;
         --output_dir|--output_dir=*)
             HAS_OUTPUT_DIR=1
@@ -148,6 +153,11 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Auto-add config.yaml if no config specified and it exists
+if [[ ${HAS_CONFIG} -eq 0 ]] && [[ -f "${PROJECT_DIR}/config.yaml" ]]; then
+    SCRIPT_ARGS="--config config.yaml ${SCRIPT_ARGS}"
+fi
 
 # Add --output_dir from CHECKPOINT_DIR if not already provided
 if [[ ${HAS_OUTPUT_DIR} -eq 0 ]] && [[ -n "${CHECKPOINT_DIR}" ]]; then
