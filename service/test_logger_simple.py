@@ -90,3 +90,4 @@ print("✓ Test complete! Now check metrics:")
 print("  1. Run: /opt/miniconda3/envs/mri/bin/python service/debug_aim.py")
 print("  2. Look for the newest run and check if loss/dice are logged")
 print("=" * 80 + "\n")
+

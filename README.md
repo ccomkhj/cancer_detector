@@ -25,9 +25,17 @@ mri/
 │   │   └── study/             # Full study downloads
 │   ├── overlay/                # 3D Slicer biopsy annotations
 │   │   └── Biopsy Overlays (3D Slicer)/
-│   ├── nbia/                   # Downloaded DICOM files
+│   ├── nbia/                   # Downloaded DICOM files (T2)
 │   │   └── class{1,2,3,4}/
-│   ├── processed/              # Converted per-slice PNG images
+│   ├── nbia_ep2d_adc/          # Downloaded DICOM files (ADC)
+│   │   └── class{1,2,3,4}/
+│   ├── nbia_ep2d_calc/         # Downloaded DICOM files (CALC_BVAL)
+│   │   └── class{1,2,3,4}/
+│   ├── processed/              # Converted per-slice PNG images (T2)
+│   │   └── class{1,2,3,4}/case_XXXX/{series_uid}/images/
+│   ├── processed_ep2d_adc/     # Converted per-slice PNG images (ADC)
+│   │   └── class{1,2,3,4}/case_XXXX/{series_uid}/images/
+│   ├── processed_ep2d_calc/    # Converted per-slice PNG images (CALC_BVAL)
 │   │   └── class{1,2,3,4}/case_XXXX/{series_uid}/images/
 │   ├── processed_seg/          # Segmentation masks (aligned)
 │   │   └── class{1,2,3,4}/case_XXXX/{series_uid}/{structure}/
@@ -48,11 +56,6 @@ mri/
 │   │   ├── process_overlay_aligned.py    # STL → PNG masks (DICOM-aligned)
 │   │   ├── visualize_overlay_masks.py    # Visualize masks on images
 │   │   └── README_OVERLAY_PROCESSING.md  # Preprocessing documentation
-│   ├── tcia/                   # TCIA manifest generation
-│   │   ├── tcia_generator.py             # Core manifest generator
-│   │   ├── generate_tcia_by_class.py     # By sequence type
-│   │   ├── generate_tcia_by_study.py     # By full study
-│   │   └── README_TCIA_GENERATOR.md      # TCIA documentation
 │   ├── dataset/                # PyTorch dataset loaders
 │   │   ├── dataset_2d5_multiclass.py     # Multi-class 2.5D dataset
 │   │   ├── dataset_2d5_with_seg.py       # 2.5D with segmentation
@@ -74,6 +77,17 @@ mri/
 └── requirements.txt
 ```
 
+TCIA manifest generation has moved to `../tcia-handler/tools/tcia`.
+
+Expected repo layout:
+```
+directory/
+├── mri/
+└── tcia-handler/
+```
+If your layout differs, set `TCIA_TOOLS_DIR` (direct path to `tools/tcia`) or
+`TCIA_HANDLER_ROOT` (path to the repo root) before running `service/preprocess.py`.
+
 ## 🚀 Quick Start (3 Commands)
 
 ### 1. Preprocess Data
@@ -81,7 +95,7 @@ mri/
 conda activate mri
 python service/preprocess.py
 ```
-Runs all data conversion: Excel→Parquet, TCIA manifests, DICOM→PNG, STL→Masks
+Runs all data conversion except TCIA manifest generation (see `../tcia-handler`).
 
 ### 2. Validate Data
 ```bash
@@ -179,15 +193,17 @@ python tools/preprocessing/merge_datasets.py
 
 Create `.tcia` manifest files for downloading DICOM data.
 
+Run these from the `mri/` repo root so outputs land in `mri/data/tcia/`.
+
 **Option A: By Series (T2, ADC, CALC_BVAL separately)**
 ```bash
-python tools/tcia/generate_tcia_by_class.py
+python ../tcia-handler/tools/tcia/generate_tcia_by_class.py
 ```
 **Output:** `data/tcia/{t2,ep2d_adc,ep2d_calc}/class{1-4}.tcia`
 
 **Option B: By Study (Download all sequences)**
 ```bash
-python tools/tcia/generate_tcia_by_study.py
+python ../tcia-handler/tools/tcia/generate_tcia_by_study.py
 ```
 **Output:** `data/tcia/study/class{1-4}.tcia`
 
@@ -204,6 +220,16 @@ Use the NBIA Data Retriever to download DICOM files from TCIA.
    - `class2.tcia` → `data/nbia/class2/`
    - `class3.tcia` → `data/nbia/class3/`
    - `class4.tcia` → `data/nbia/class4/`
+4. Download ep2d_adc manifests to `data/nbia_ep2d_adc/`:
+   - `data/tcia/ep2d_adc/class1.tcia` → `data/nbia_ep2d_adc/class1/`
+   - `data/tcia/ep2d_adc/class2.tcia` → `data/nbia_ep2d_adc/class2/`
+   - `data/tcia/ep2d_adc/class3.tcia` → `data/nbia_ep2d_adc/class3/`
+   - `data/tcia/ep2d_adc/class4.tcia` → `data/nbia_ep2d_adc/class4/`
+5. Download ep2d_calc manifests to `data/nbia_ep2d_calc/`:
+   - `data/tcia/ep2d_calc/class1.tcia` → `data/nbia_ep2d_calc/class1/`
+   - `data/tcia/ep2d_calc/class2.tcia` → `data/nbia_ep2d_calc/class2/`
+   - `data/tcia/ep2d_calc/class3.tcia` → `data/nbia_ep2d_calc/class3/`
+   - `data/tcia/ep2d_calc/class4.tcia` → `data/nbia_ep2d_calc/class4/`
 
 **Expected directory structure after download:**
 ```
@@ -228,11 +254,14 @@ Convert DICOM series to per-slice PNG images.
 ```bash
 python tools/preprocessing/dicom_converter.py --all
 ```
+Converts T2, ep2d_adc, and ep2d_calc sequences by default and writes to the
+corresponding `data/processed*` directories.
 
 **Process Single Class:**
 ```bash
 python tools/preprocessing/dicom_converter.py --class 1
 ```
+To process a single sequence, pass `--input` and `--output` for that sequence.
 
 **Output Structure:**
 ```
@@ -249,6 +278,20 @@ data/processed/
   class2/
     ...
   manifest_all.csv            # Combined manifest for all classes
+
+data/processed_ep2d_adc/
+  class1/
+    case_0001/
+      {SeriesInstanceUID}/
+        ...
+  manifest_all.csv
+
+data/processed_ep2d_calc/
+  class1/
+    case_0001/
+      {SeriesInstanceUID}/
+        ...
+  manifest_all.csv
 ```
 
 **Manifest CSV Columns:**
@@ -484,7 +527,7 @@ Image-Only Records (data/splitted_images/) - 197 series
     ↓ [merge_datasets.py]
 Enriched Records (data/splitted_info/) - 10,881 rows with targets & biopsies
     │
-    ├→ [generate_tcia_by_class.py / generate_tcia_by_study.py]
+    ├→ [tcia-handler: generate_tcia_by_class.py / generate_tcia_by_study.py]
     │  TCIA Manifests (.tcia files)
     │      ↓ [NBIA Data Retriever - Manual]
     │  DICOM Files (data/nbia/)

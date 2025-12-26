@@ -1,2 +1,0 @@
-"""TCIA manifest generation tools."""
-

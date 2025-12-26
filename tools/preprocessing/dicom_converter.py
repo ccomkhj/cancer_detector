@@ -24,7 +24,7 @@ Usage:
     # Single class
     python dicom_converter.py --class 1
 
-    # All classes
+    # All classes (defaults to T2 + ep2d_adc + ep2d_calc sequences)
     python dicom_converter.py --all
 
     # Or import and use programmatically
@@ -517,6 +517,12 @@ class DicomConverter:
 # Batch processing functions
 # -------------------------
 
+DEFAULT_SEQUENCE_DIRS = {
+    "t2": (Path("data/nbia"), Path("data/processed")),
+    "ep2d_adc": (Path("data/nbia_ep2d_adc"), Path("data/processed_ep2d_adc")),
+    "ep2d_calc": (Path("data/nbia_ep2d_calc"), Path("data/processed_ep2d_calc")),
+}
+
 
 def process_class(
     class_num: int,
@@ -628,8 +634,31 @@ def process_all_classes(
     total_with_labels = sum(s["num_with_labels"] for s in all_stats.values())
     logging.info(f"\nTotal slices: {total_slices}")
     logging.info(f"Total with labels: {total_with_labels}")
-    logging.info(f"Label coverage: {100*total_with_labels/total_slices:.1f}%")
+    if total_slices:
+        logging.info(f"Label coverage: {100*total_with_labels/total_slices:.1f}%")
+    else:
+        logging.info("Label coverage: n/a (no slices)")
     logging.info("=" * 70)
+
+
+def process_all_sequences(
+    sequences: Dict[str, Tuple[Path, Path]] = DEFAULT_SEQUENCE_DIRS,
+) -> None:
+    logging.info("\n" + "=" * 70)
+    logging.info("DICOM CONVERTER - Batch Processing All Sequences")
+    logging.info("=" * 70)
+
+    for sequence_name, (input_dir, output_dir) in sequences.items():
+        if not input_dir.exists():
+            logging.warning(
+                f"Sequence '{sequence_name}' input directory not found: {input_dir} (skipping)"
+            )
+            continue
+
+        logging.info("\n" + "-" * 70)
+        logging.info(f"Sequence: {sequence_name}")
+        logging.info("-" * 70)
+        process_all_classes(input_dir, output_dir)
 
 
 if __name__ == "__main__":
@@ -645,25 +674,40 @@ if __name__ == "__main__":
         choices=[1, 2, 3, 4],
         help="Process specific class (1-4)",
     )
-    parser.add_argument("--all", action="store_true", help="Process all classes")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Process all classes. If --input/--output are not provided, "
+            "defaults to all sequences (t2, ep2d_adc, ep2d_calc)."
+        ),
+    )
     parser.add_argument(
         "--input",
         type=str,
-        default="data/nbia",
+        default=None,
         help="Input base directory (default: data/nbia)",
     )
     parser.add_argument(
         "--output",
         type=str,
-        default="data/processed",
+        default=None,
         help="Output base directory (default: data/processed)",
     )
 
     args = parser.parse_args()
 
+    default_input = DEFAULT_SEQUENCE_DIRS["t2"][0]
+    default_output = DEFAULT_SEQUENCE_DIRS["t2"][1]
+    input_path = Path(args.input) if args.input else default_input
+    output_path = Path(args.output) if args.output else default_output
+
     if args.all:
-        process_all_classes(Path(args.input), Path(args.output))
+        if args.input or args.output:
+            process_all_classes(input_path, output_path)
+        else:
+            process_all_sequences()
     elif args.class_num:
-        process_class(args.class_num, Path(args.input), Path(args.output))
+        process_class(args.class_num, input_path, output_path)
     else:
         parser.print_help()
