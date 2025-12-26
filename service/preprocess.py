@@ -24,7 +24,6 @@ Usage:
 
 import sys
 import argparse
-import os
 from pathlib import Path
 import subprocess
 import logging
@@ -118,27 +117,13 @@ class PreprocessingPipeline:
             logger.info("✓ TCIA manifests already generated")
             return True
         
-        tcia_tools_env = os.environ.get("TCIA_TOOLS_DIR")
-        tcia_root_env = os.environ.get("TCIA_HANDLER_ROOT")
-        if tcia_tools_env:
-            tcia_tools_dir = Path(tcia_tools_env)
-        elif tcia_root_env:
-            tcia_tools_dir = Path(tcia_root_env) / "tools" / "tcia"
-        else:
-            tcia_tools_dir = self.project_root.parent / "tcia-handler" / "tools" / "tcia"
-
-        if not tcia_tools_dir.exists():
-            logger.error(f"TCIA tools directory not found: {tcia_tools_dir}")
-            logger.error("Set TCIA_TOOLS_DIR or TCIA_HANDLER_ROOT to override.")
-            return False
-
         # Generate by class (T2, ADC, CALC)
-        cmd = ["python", str(tcia_tools_dir / "generate_tcia_by_class.py")]
+        cmd = ["python", str(self.tools_dir / "generate_tcia_by_class.py")]
         if not self.run_command(cmd, "TCIA manifest generation (by class)"):
             return False
         
         # Generate by study (full download)
-        cmd = ["python", str(tcia_tools_dir / "generate_tcia_by_study.py")]
+        cmd = ["python", str(self.tools_dir / "generate_tcia_by_study.py")]
         return self.run_command(cmd, "TCIA manifest generation (by study)")
     
     def step_4_convert_dicom_to_png(self, class_num: int = None) -> bool:
@@ -323,3 +308,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

@@ -7,6 +7,7 @@ Organized collection of utilities for the MRI 2.5D segmentation pipeline.
 ```
 tools/
 ├── preprocessing/     # Data conversion and processing
+├── tcia/             # TCIA manifest generation
 ├── dataset/          # PyTorch dataset loaders
 ├── deployment/       # Cloud deployment utilities
 └── validation/       # Testing and validation scripts
@@ -36,16 +37,22 @@ python tools/preprocessing/process_overlay_aligned.py
 
 ---
 
-### TCIA Manifest Generation
-TCIA tools moved to `../tcia-handler/tools/tcia`.
+### [`tcia/`](tcia/) - TCIA Manifest Generation
+Generate `.tcia` manifest files for downloading DICOM data from TCIA.
 
-**Quick Start (run from `mri/`):**
+| Script | Purpose |
+|--------|---------|
+| `tcia_generator.py` | Core TCIA manifest generator |
+| `generate_tcia_by_class.py` | Generate by sequence type (T2, ADC, etc.) |
+| `generate_tcia_by_study.py` | Generate by study (full download) |
+
+**Quick Start:**
 ```bash
 # Generate manifests by sequence type
-python ../tcia-handler/tools/tcia/generate_tcia_by_class.py
+python tools/tcia/generate_tcia_by_class.py
 
 # Or by full study
-python ../tcia-handler/tools/tcia/generate_tcia_by_study.py
+python tools/tcia/generate_tcia_by_study.py
 ```
 
 ---
@@ -124,7 +131,7 @@ python tools/validation/validate_all_masks.py
 python tools/preprocessing/convert_xlsx2parquet.py
 
 # Generate TCIA manifests
-python ../tcia-handler/tools/tcia/generate_tcia_by_class.py
+python tools/tcia/generate_tcia_by_class.py
 
 # Download DICOM using NBIA Data Retriever (manual)
 
@@ -231,3 +238,4 @@ from tools.dataset.transforms_2d5 import get_transforms
 2. **Check --help**: All scripts have help text: `python script.py --help`
 3. **Read category READMEs**: Each subdirectory has detailed docs
 4. **Test incrementally**: Validate after each preprocessing step
+

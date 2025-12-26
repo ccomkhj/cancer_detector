@@ -18,7 +18,7 @@ Complete documentation for the MRI 2.5D Segmentation Pipeline.
 ### Tools Documentation
 - **[Tools Overview](../tools/README.md)** - All tools organized by category
 - **[Preprocessing Tools](../tools/preprocessing/)** - Data conversion
-- **[TCIA Tools](../../tcia-handler/tools/tcia/)** - Manifest generation
+- **[TCIA Tools](../tools/tcia/)** - Manifest generation
 - **[Dataset Tools](../tools/dataset/)** - PyTorch loaders
 - **[Deployment Tools](../tools/deployment/)** - Cloud deployment
 - **[Validation Tools](../tools/validation/)** - Testing & validation
