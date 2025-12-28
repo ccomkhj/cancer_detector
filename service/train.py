@@ -582,6 +582,14 @@ def validate_epoch(
                 # Add per-class metrics
                 class_names = ["prostate", "target"]
                 for c, name in enumerate(class_names):
+                    # Compute per-class dice for batch-level logging
+                    pred = torch.sigmoid(outputs)
+                    pred_binary = (pred > 0.5).float()
+                    pred_c = pred_binary[:, c].reshape(-1)
+                    target_c = masks[:, c].reshape(-1)
+                    intersection = (pred_c * target_c).sum()
+                    dice_c = (2.0 * intersection) / (pred_c.sum() + target_c.sum() + 1e-8)
+                    wandb_metrics[f"val/batch_dice_{name}"] = dice_c.item()
                     wandb_metrics[f"val/batch_precision_{name}"] = precision_per_class[c]
                     wandb_metrics[f"val/batch_recall_{name}"] = recall_per_class[c]
                 wandb.log(wandb_metrics, step=global_step)
@@ -1307,7 +1315,7 @@ def main():
                         print(f"⚠️  Weave initialization failed (non-critical): {weave_error}")
 
                 # Initialize wandb run - use job_id as run name
-                wandb_run_name = f"{job_id}_{datetime.now().strftime("%m%d_%H%M")}"  # Use job_id as run name
+                wandb_run_name = f"{job_id}_{args.loss}_lr:{args.lr}_epochs:{args.epochs}_datetime:{datetime.now().strftime('%m%d_%H%M')}"  # Use job_id as run name
                 
                 # Add git commit to hyperparams if available
                 git_commit = get_git_commit_hash()
@@ -1491,6 +1499,7 @@ def main():
                 "val/dice": val_dice,
                 "val/precision": val_precision,
                 "val/recall": val_recall,
+                "epoch": epoch,
             }
             # Add per-class metrics
             for c, name in enumerate(class_names):

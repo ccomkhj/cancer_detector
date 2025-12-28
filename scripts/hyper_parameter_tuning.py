@@ -219,102 +219,235 @@ SLURM_OPTIONS = [
 # Define your hyperparameter search space here.
 # Each dictionary represents one job with specific parameter overrides.
 # Parameters not specified will use values from config.yaml
+# All configurations use focal_tversky loss (as specified in config)
 
 HYPERPARAMETER_CONFIGS = [
-    # Fast training with OneCycle (recommended in config comments)
+    # ============================================================================
+    # BASELINE: Current configuration from config.yaml
+    # ============================================================================
     {
-        "name": "onecycle_fast",
-        "scheduler": "onecycle",
-        "lr": 0.0001,
-        "scheduler_max_lr_mult": 10.0,
-    },
-    
-    # Conservative stable training (recommended in config comments)
-    {
-        "name": "reduce_on_plateau_conservative",
-        "scheduler": "reduce_on_plateau",
-        "scheduler_patience": 5,
-        "scheduler_factor": 0.5,
-        "lr": 0.0005,
-    },
-    
-    # Experimental with warm restarts (recommended in config comments)
-    {
-        "name": "cosine_warm_restarts",
+        "name": "baseline_cosine_current",
         "scheduler": "cosine",
-        "scheduler_t0": 10,
+        "scheduler_t0": 15,
         "scheduler_tmult": 2,
-        "lr": 0.0005,
-    },
-    
-    # OneCycle with different learning rates
-    {
-        "name": "onecycle_lr_5e4",
-        "scheduler": "onecycle",
-        "lr": 0.0005,
-        "scheduler_max_lr_mult": 10.0,
-    },
-    
-    {
-        "name": "onecycle_lr_1e4",
-        "scheduler": "onecycle",
+        "scheduler_min_lr": 0.000001,
         "lr": 0.0001,
-        "scheduler_max_lr_mult": 10.0,
+        "epochs": 100,
     },
-    
+
+    # ============================================================================
+    # LEARNING RATE VARIATIONS
+    # ============================================================================
+    # Higher learning rates for faster convergence
     {
-        "name": "onecycle_lr_1e5",
+        "name": "cosine_lr_5e4",
+        "scheduler": "cosine",
+        "scheduler_t0": 15,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.000001,
+        "lr": 0.0005,
+        "epochs": 100,
+    },
+
+    # Lower learning rates for more stable training
+    {
+        "name": "cosine_lr_5e5",
+        "scheduler": "cosine",
+        "scheduler_t0": 15,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.000001,
+        "lr": 0.00005,
+        "epochs": 100,
+    },
+
+    # Very low learning rate
+    {
+        "name": "cosine_lr_1e5",
+        "scheduler": "cosine",
+        "scheduler_t0": 15,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.0000001,
+        "lr": 0.00001,
+        "epochs": 100,
+    },
+
+    # ============================================================================
+    # SCHEDULER VARIATIONS
+    # ============================================================================
+    # OneCycle variations (aggressive learning)
+    {
+        "name": "onecycle_aggressive",
+        "scheduler": "onecycle",
+        "lr": 0.00005,
+        "scheduler_max_lr_mult": 15.0,
+        "scheduler_warmup_pct": 0.3,
+        "epochs": 50,  # OneCycle works well with fewer epochs
+    },
+
+    {
+        "name": "onecycle_conservative",
         "scheduler": "onecycle",
         "lr": 0.00001,
         "scheduler_max_lr_mult": 10.0,
+        "scheduler_warmup_pct": 0.3,
+        "epochs": 75,
     },
-    
-    # ReduceLROnPlateau with different patience values
+
+    # ReduceLROnPlateau variations
     {
-        "name": "reduce_on_plateau_patience_3",
+        "name": "reduce_plateau_aggressive",
         "scheduler": "reduce_on_plateau",
         "scheduler_patience": 3,
         "scheduler_factor": 0.5,
-        "lr": 0.0005,
-    },
-    
-    {
-        "name": "reduce_on_plateau_patience_7",
-        "scheduler": "reduce_on_plateau",
-        "scheduler_patience": 7,
-        "scheduler_factor": 0.5,
-        "lr": 0.0005,
-    },
-    
-    # Different batch sizes
-    {
-        "name": "onecycle_batch_16",
-        "scheduler": "onecycle",
         "lr": 0.0001,
-        "scheduler_max_lr_mult": 10.0,
+        "epochs": 100,
     },
-    
+
     {
-        "name": "onecycle_batch_4",
-        "scheduler": "onecycle",
+        "name": "reduce_plateau_patient",
+        "scheduler": "reduce_on_plateau",
+        "scheduler_patience": 8,
+        "scheduler_factor": 0.3,  # More aggressive reduction
+        "lr": 0.0001,
+        "epochs": 100,
+    },
+
+    # Cosine with different cycle lengths
+    {
+        "name": "cosine_short_cycles",
+        "scheduler": "cosine",
+        "scheduler_t0": 8,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.000001,
+        "lr": 0.0001,
+        "epochs": 100,
+    },
+
+    {
+        "name": "cosine_long_cycles",
+        "scheduler": "cosine",
+        "scheduler_t0": 25,
+        "scheduler_tmult": 1,  # No multiplication
+        "scheduler_min_lr": 0.000001,
+        "lr": 0.0001,
+        "epochs": 100,
+    },
+
+    # ============================================================================
+    # BATCH SIZE VARIATIONS
+    # ============================================================================
+    {
+        "name": "cosine_batch_16",
+        "scheduler": "cosine",
+        "scheduler_t0": 15,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.000001,
+        "lr": 0.0001,
+        "batch_size": 16,
+        "epochs": 100,
+    },
+
+    {
+        "name": "cosine_batch_4",
+        "scheduler": "cosine",
+        "scheduler_t0": 15,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.000001,
         "lr": 0.0001,
         "batch_size": 4,
+        "epochs": 100,
+    },
+
+    # ============================================================================
+    # 2.5D STACK DEPTH VARIATIONS
+    # ============================================================================
+    {
+        "name": "cosine_stack_3",
+        "scheduler": "cosine",
+        "scheduler_t0": 15,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.000001,
+        "lr": 0.0001,
+        "stack_depth": 3,
+        "epochs": 100,
+    },
+
+    {
+        "name": "cosine_stack_7",
+        "scheduler": "cosine",
+        "scheduler_t0": 15,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.000001,
+        "lr": 0.0001,
+        "stack_depth": 7,
+        "epochs": 100,
+    },
+
+    # ============================================================================
+    # FOCAL TVERSKY PARAMETER TUNING (subtle variations)
+    # ============================================================================
+    # Slightly adjust gamma for harder focusing
+    {
+        "name": "cosine_ft_gamma_1_5",
+        "scheduler": "cosine",
+        "scheduler_t0": 15,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.000001,
+        "lr": 0.0001,
+        "ft_gamma": 1.5,
+        "epochs": 100,
+    },
+
+    # Favor more recall for targets
+    {
+        "name": "cosine_ft_recall_focus",
+        "scheduler": "cosine",
+        "scheduler_t0": 15,
+        "scheduler_tmult": 2,
+        "scheduler_min_lr": 0.000001,
+        "lr": 0.0001,
+        "ft_alpha": [0.7, 0.9],
+        "ft_beta": [0.3, 0.1],
+        "epochs": 100,
+    },
+
+    # ============================================================================
+    # COMBINED OPTIMIZATIONS
+    # ============================================================================
+    # High precision setup (from config examples)
+    {
+        "name": "high_precision_setup",
+        "scheduler": "onecycle",
+        "lr": 0.00005,
+        "scheduler_max_lr_mult": 15.0,
+        "ft_gamma": 1.5,
+        "ft_alpha": [0.7, 0.9],
+        "ft_beta": [0.3, 0.1],
+        "ft_class_weights": [1.0, 3.0],
+        "epochs": 75,
+    },
+
+    # Memory efficient setup
+    {
+        "name": "memory_efficient",
+        "scheduler": "reduce_on_plateau",
+        "scheduler_patience": 8,
+        "scheduler_factor": 0.5,
+        "lr": 0.00003,
+        "batch_size": 4,
+        "num_workers": 2,
+        "epochs": 100,
+    },
+
+    # Fast ablation setup
+    {
+        "name": "fast_ablation",
+        "scheduler": "onecycle",
+        "lr": 0.0001,
         "scheduler_max_lr_mult": 10.0,
-    },
-    
-    # Cosine simple scheduler
-    {
-        "name": "cosine_simple",
-        "scheduler": "cosine_simple",
-        "lr": 0.0005,
-    },
-    
-    # Step scheduler
-    {
-        "name": "step_lr",
-        "scheduler": "step",
-        "lr": 0.0005,
-        "scheduler_step_size": 10,
+        "epochs": 30,
+        "vis_every": 5,
+        "thr_sweep_every": 3,
     },
 ]
 
