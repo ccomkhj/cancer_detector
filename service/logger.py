@@ -316,11 +316,16 @@ def get_run_name(args: Any) -> str:
     timestamp = datetime.now().strftime("%m%d_%H%M")
 
     # Extract key parameters
-    manifest_name = (
-        Path(args.manifest).parent.name if hasattr(args, "manifest") else "unknown"
-    )
+    if hasattr(args, "metadata") and args.metadata:
+        # Use metadata filename or parent dir
+        data_source = Path(args.metadata).stem
+    elif hasattr(args, "manifest") and args.manifest:
+        data_source = Path(args.manifest).parent.name
+    else:
+        data_source = "unknown"
+        
     batch_size = args.batch_size if hasattr(args, "batch_size") else "unknown"
     lr = args.lr if hasattr(args, "lr") else "unknown"
     loss = args.loss if hasattr(args, "loss") else "unknown"
 
-    return f"{manifest_name}_bs{batch_size}_lr{lr}_{loss}_{timestamp}"
+    return f"{data_source}_bs{batch_size}_lr{lr}_{loss}_{timestamp}"

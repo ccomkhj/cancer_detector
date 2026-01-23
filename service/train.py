@@ -1,41 +1,19 @@
 #!/usr/bin/env python3
 """
-Train 2.5D Multi-Class Segmentation Model
+Train 2.5D Multi-Modal Segmentation Model (T2 + ADC + Calc)
 
-This training script trains on ALL masks simultaneously:
-- Images from data/processed/
-- All masks from data/processed_seg/ (prostate, target1, target2)
+This training script trains on 7-channel input:
+- T2 Context (5 slices)
+- ADC (1 slice)
+- Calc (1 slice)
 
 Output: Multi-class segmentation model
   - Class 0: Prostate (Red)
   - Class 1: Target (Green) [combined Target1 + Target2]
 
-Features:
-  - Advanced learning rate schedulers (OneCycle, Cosine, ReduceLROnPlateau, etc.)
-  - Validation visualizations logged to Aim
-  - Comprehensive experiment tracking with Aim and Weights & Biases (wandb)
-  - Checkpoint saving and resuming
-
 Usage:
-    # Use config file (recommended)
     python service/train.py --config config.yaml
-
-    # Override specific parameters
-    python service/train.py --config config.yaml --epochs 100 --batch_size 16
-
-    # Continue from checkpoint (use job-specific path)
-    python service/train.py --config config.yaml --resume checkpoints/755384/model_epoch_25.pt
-
-    # Pure CLI (no config file)
-    python service/train.py --manifest data/processed/class2/manifest.csv --epochs 50 --scheduler onecycle
-
-    # Enable wandb logging
-    python service/train.py --config config.yaml --wandb --wandb_project your_project_name
-
-Note:
-    For wandb, ensure WANDB_API_KEY is set:
-    export WANDB_API_KEY="<your_wandb_api_key>"
-    Find your key at: https://wandb.ai/authorize
+    python service/train.py --metadata data/aligned_v2/metadata.json --epochs 50
 """
 
 import os
@@ -61,9 +39,9 @@ from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from tools.dataset.dataset_2d5_multiclass import (
-    MRI25DMultiClassDataset,
-    create_multiclass_dataloader,
+from tools.dataset.dataset_multimodal import (
+    MultiModalDataset,
+    create_multimodal_dataloader,
 )
 
 # Import models and metrics from separate modules
@@ -188,11 +166,13 @@ def get_current_lr(optimizer):
 def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4):
     """
     Create visualization of predictions vs ground truth
+    
+    Visualizes T2 (Center), ADC, Calc, and Predictions.
 
     Args:
-        images: (B, C, H, W) - input images
-        masks_gt: (B, 3, H, W) - ground truth masks
-        masks_pred: (B, 3, H, W) - predicted masks (after sigmoid)
+        images: (B, C, H, W) - input images (C=7: 5 T2 + 1 ADC + 1 Calc)
+        masks_gt: (B, 2, H, W) - ground truth masks [Prostate, Target]
+        masks_pred: (B, 2, H, W) - predicted masks (after sigmoid)
         num_samples: Number of samples to visualize
 
     Returns:
@@ -203,77 +183,101 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
     # Class colors (RGB)
     colors = {
         0: [1.0, 0.0, 0.0],  # Prostate - Red
-        1: [0.0, 1.0, 0.0],  # Target - Green (combined Target1 + Target2)
+        1: [0.0, 1.0, 0.0],  # Target - Green
     }
 
     class_names = ["Prostate", "Target"]
 
     visualizations = {}
+    
+    # Identify channel indices
+    # T2 context is 0-4 (depth 5). Center T2 is at index 2.
+    # ADC is at index 5.
+    # Calc is at index 6.
+    # We should make this robust to stack_depth, but assuming 5 for now.
+    stack_depth = images.shape[1] - 2
+    t2_idx = stack_depth // 2
+    adc_idx = stack_depth
+    calc_idx = stack_depth + 1
 
     for idx in range(batch_size):
-        # Get middle slice from stack
-        img = images[idx, images.shape[1] // 2].cpu().numpy()
+        # Get slices
+        t2_img = images[idx, t2_idx].cpu().numpy()
+        adc_img = images[idx, adc_idx].cpu().numpy()
+        calc_img = images[idx, calc_idx].cpu().numpy()
+        
         gt = masks_gt[idx].cpu().numpy()
         pred = masks_pred[idx].cpu().numpy()
 
-        # Normalize image for display
-        img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+        # Normalize images for display (min-max)
+        def norm(img):
+            return (img - img.min()) / (img.max() - img.min() + 1e-8)
+            
+        t2_disp = norm(t2_img)
+        adc_disp = norm(adc_img)
+        calc_disp = norm(calc_img)
 
-        # Create figure with 4 columns: Image, GT, Pred, Overlay
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        # Create figure with 2 rows, 4 columns
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
 
-        # Row 1: Ground Truth
-        # Image
-        axes[0, 0].imshow(img, cmap="gray")
-        axes[0, 0].set_title("Input Image", fontsize=12, fontweight="bold")
+        # Row 1: Modalities + GT Overlay
+        # T2
+        axes[0, 0].imshow(t2_disp, cmap="gray")
+        axes[0, 0].set_title("T2 (Center)", fontsize=12, fontweight="bold")
         axes[0, 0].axis("off")
-
-        # Ground truth overlay
-        axes[0, 1].imshow(img, cmap="gray")
-        gt_overlay = np.zeros((*img.shape, 3))
-        for c in range(3):
-            for channel in range(3):
-                gt_overlay[:, :, channel] += gt[c] * colors[c][channel]
-        axes[0, 1].imshow(gt_overlay, alpha=0.5)
-        axes[0, 1].set_title("Ground Truth", fontsize=12, fontweight="bold")
+        
+        # ADC
+        axes[0, 1].imshow(adc_disp, cmap="gray")
+        axes[0, 1].set_title("ADC", fontsize=12, fontweight="bold")
         axes[0, 1].axis("off")
-
-        # Individual GT masks
-        axes[0, 2].imshow(img, cmap="gray")
-        axes[0, 2].set_title("GT Classes", fontsize=12, fontweight="bold")
-        for c in range(2):
-            if gt[c].max() > 0:
-                axes[0, 2].contour(
-                    gt[c], levels=[0.5], colors=[colors[c]], linewidths=2
-                )
+        
+        # Calc
+        axes[0, 2].imshow(calc_disp, cmap="gray")
+        axes[0, 2].set_title("Calc", fontsize=12, fontweight="bold")
         axes[0, 2].axis("off")
 
-        # Row 2: Predictions
-        # Image (repeated for alignment)
-        axes[1, 0].imshow(img, cmap="gray")
-        axes[1, 0].set_title("Input Image", fontsize=12, fontweight="bold")
-        axes[1, 0].axis("off")
+        # Ground truth overlay on T2
+        axes[0, 3].imshow(t2_disp, cmap="gray")
+        gt_overlay = np.zeros((*t2_disp.shape, 3))
+        for c in range(2):
+            for channel in range(3):
+                gt_overlay[:, :, channel] += gt[c] * colors[c][channel]
+        axes[0, 3].imshow(gt_overlay, alpha=0.5)
+        axes[0, 3].set_title("Ground Truth (on T2)", fontsize=12, fontweight="bold")
+        axes[0, 3].axis("off")
 
-        # Prediction overlay
-        axes[1, 1].imshow(img, cmap="gray")
-        pred_overlay = np.zeros((*img.shape, 3))
+        # Row 2: Predictions
+        # Prediction overlay on T2
+        axes[1, 0].imshow(t2_disp, cmap="gray")
+        pred_overlay = np.zeros((*t2_disp.shape, 3))
         pred_binary = (pred > 0.5).astype(float)
-        for c in range(3):
+        for c in range(2):
             for channel in range(3):
                 pred_overlay[:, :, channel] += pred_binary[c] * colors[c][channel]
+        axes[1, 0].imshow(pred_overlay, alpha=0.5)
+        axes[1, 0].set_title("Prediction (on T2)", fontsize=12, fontweight="bold")
+        axes[1, 0].axis("off")
+        
+        # Prediction overlay on ADC
+        axes[1, 1].imshow(adc_disp, cmap="gray")
         axes[1, 1].imshow(pred_overlay, alpha=0.5)
-        axes[1, 1].set_title("Prediction", fontsize=12, fontweight="bold")
+        axes[1, 1].set_title("Prediction (on ADC)", fontsize=12, fontweight="bold")
         axes[1, 1].axis("off")
-
-        # Individual prediction masks
-        axes[1, 2].imshow(img, cmap="gray")
-        axes[1, 2].set_title("Pred Classes", fontsize=12, fontweight="bold")
-        for c in range(2):
-            if pred_binary[c].max() > 0:
-                axes[1, 2].contour(
-                    pred_binary[c], levels=[0.5], colors=[colors[c]], linewidths=2
-                )
+        
+        # Individual class predictions
+        # Prostate
+        axes[1, 2].imshow(t2_disp, cmap="gray")
+        if pred_binary[0].max() > 0:
+            axes[1, 2].contour(pred_binary[0], levels=[0.5], colors=[colors[0]], linewidths=2)
+        axes[1, 2].set_title("Pred: Prostate", fontsize=12, fontweight="bold")
         axes[1, 2].axis("off")
+        
+        # Target
+        axes[1, 3].imshow(t2_disp, cmap="gray")
+        if pred_binary[1].max() > 0:
+            axes[1, 3].contour(pred_binary[1], levels=[0.5], colors=[colors[1]], linewidths=2)
+        axes[1, 3].set_title("Pred: Target", fontsize=12, fontweight="bold")
+        axes[1, 3].axis("off")
 
         # Add legend
         legend_elements = [
@@ -282,8 +286,8 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
         fig.legend(
             handles=legend_elements,
             loc="lower center",
-            ncol=3,
-            fontsize=11,
+            ncol=2,
+            fontsize=12,
             frameon=True,
         )
 
@@ -724,8 +728,7 @@ def validate_epoch(
                                 wandb.Table(data=[[t, d] for t, d in zip(thresholds, dice_scores)],
                                            columns=["threshold", "dice"]),
                                 "threshold", "dice",
-                                title=f"Target Dice vs Threshold (Epoch {epoch+1})"
-                            )
+                                title=f"Target Dice vs Threshold (Epoch {epoch+1})")
                         }, step=epoch)
 
                         # Precision vs Threshold plot
@@ -734,8 +737,7 @@ def validate_epoch(
                                 wandb.Table(data=[[t, p] for t, p in zip(thresholds, precisions)],
                                            columns=["threshold", "precision"]),
                                 "threshold", "precision",
-                                title=f"Target Precision vs Threshold (Epoch {epoch+1})"
-                            )
+                                title=f"Target Precision vs Threshold (Epoch {epoch+1})")
                         }, step=epoch)
 
                         # Recall vs Threshold plot
@@ -744,8 +746,7 @@ def validate_epoch(
                                 wandb.Table(data=[[t, r] for t, r in zip(thresholds, recalls)],
                                            columns=["threshold", "recall"]),
                                 "threshold", "recall",
-                                title=f"Target Recall vs Threshold (Epoch {epoch+1})"
-                            )
+                                title=f"Target Recall vs Threshold (Epoch {epoch+1})")
                         }, step=epoch)
 
                         # Precision-Recall curve
@@ -754,8 +755,7 @@ def validate_epoch(
                                 wandb.Table(data=[[r, p] for r, p in zip(recalls, precisions)],
                                            columns=["recall", "precision"]),
                                 "recall", "precision",
-                                title=f"Target Precision-Recall (Epoch {epoch+1})"
-                            )
+                                title=f"Target Precision-Recall (Epoch {epoch+1})")
                         }, step=epoch)
 
                 # Log best threshold scalar metrics
@@ -835,7 +835,7 @@ def merge_config_with_args(args):
 def create_argument_parser():
     """Create argument parser (separated for config merging)"""
     parser = argparse.ArgumentParser(
-        description="Train 2.5D multi-class segmentation model (prostate + target1 + target2)"
+        description="Train 2.5D Multi-Modal segmentation model (T2 + ADC + Calc)"
     )
 
     # Config file
@@ -848,10 +848,26 @@ def create_argument_parser():
 
     # Data arguments
     parser.add_argument(
-        "--manifest", type=str, default=None, help="Path to manifest CSV"
+        "--metadata", type=str, default="data/aligned_v2/metadata.json", 
+        help="Path to metadata.json"
     )
+    # Kept for compatibility but not used primarily
     parser.add_argument(
-        "--stack_depth", type=int, default=5, help="Number of slices to stack"
+        "--manifest", type=str, default=None, help="Deprecated: Path to manifest CSV"
+    )
+    
+    parser.add_argument(
+        "--stack_depth", type=int, default=5, help="Number of T2 context slices"
+    )
+    
+    parser.add_argument(
+        "--require_complete", action="store_true", 
+        help="If set, only train on samples with ADC and Calc data"
+    )
+    
+    parser.add_argument(
+        "--require_positive", action="store_true",
+        help="If set, only train on samples with prostate mask"
     )
 
     # Training arguments
@@ -1044,66 +1060,37 @@ def main():
     # Merge with config file if provided
     args = merge_config_with_args(args)
 
-    # Validate required arguments
-    if args.manifest is None:
-        parser.error("--manifest is required (either via CLI or config file)")
-
     # Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\n{'='*80}")
-    print(f"Training 2.5D Multi-Class Segmentation Model")
-    print(f"{'='*80}")
+    print(f"Training 2.5D Multi-Modal Segmentation Model")
+    print(f"{ '='*80}")
     print(f"Device: {device}")
-    print(f"Manifest: {args.manifest}")
-    print(f"Multi-class: Prostate + Target1 + Target2")
-    print(f"Image size: 512x512")
-    print(f"Stack depth: {args.stack_depth}")
+    print(f"Metadata: {args.metadata}")
+    print(f"Multi-class: Prostate + Target")
+    print(f"Stack depth: {args.stack_depth} (T2) + 2 (ADC/Calc)")
     print(f"Batch size: {args.batch_size}")
     print(f"Epochs: {args.epochs}")
     print(f"Learning rate: {args.lr}")
     print(f"Loss: {args.loss}")
     print(f"Output directory: {args.output_dir}")
-    print(f"{'='*80}\n")
+    print(f"{ '='*80}\n")
 
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Create datasets
-    print("Creating multi-class datasets...")
+    print("Creating multi-modal datasets...")
 
-    train_dataset = MRI25DMultiClassDataset(
-        manifest_csv=args.manifest,
+    train_dataset = MultiModalDataset(
+        metadata_path=args.metadata,
         stack_depth=args.stack_depth,
         normalize=True,
-        skip_no_masks=True,
-        target_size=(512, 512),  # Resize all images and masks to 512x512
+        require_complete=args.require_complete,
+        require_positive=args.require_positive,
     )
     
-    # Collect original input sizes from the dataset
-    print("Collecting input image sizes...")
-    original_sizes = set()
-    df = pd.read_csv(args.manifest)
-    # Sample up to 100 images to check sizes (to avoid loading all)
-    sample_size = min(100, len(df))
-    sample_df = df.sample(n=sample_size, random_state=42) if len(df) > sample_size else df
-    for _, row in sample_df.iterrows():
-        img_path = Path(row['image_path'])
-        if img_path.exists():
-            try:
-                img = Image.open(img_path)
-                original_sizes.add(img.size)  # PIL size is (width, height)
-            except Exception as e:
-                pass  # Skip if can't read
-    
-    # Print input size information
-    if original_sizes:
-        print(f"  Original input sizes found: {sorted(original_sizes)}")
-        print(f"  Target size (after resize): {train_dataset.target_size[1]}x{train_dataset.target_size[0]} (width x height)")
-        print(f"  All images will be resized to: {train_dataset.target_size[0]}x{train_dataset.target_size[1]} (height x width)")
-    else:
-        print("  Could not determine original input sizes")
-
     # Split train/val (80/20)
     train_size = int(0.8 * len(train_dataset))
     val_size = len(train_dataset) - train_size
@@ -1139,7 +1126,9 @@ def main():
 
     # Create model
     print("Creating model...")
-    model = SimpleUNet(in_channels=args.stack_depth, out_channels=2)  # 2 classes: prostate, target
+    # Input channels: T2 stack (stack_depth) + ADC (1) + Calc (1)
+    in_channels = args.stack_depth + 2
+    model = SimpleUNet(in_channels=in_channels, out_channels=2)  # 2 classes: prostate, target
     model = model.to(device)
 
     # Count parameters
@@ -1237,7 +1226,7 @@ def main():
 
     # Prepare hyperparameters dict (shared by Aim and wandb)
     hyperparams = {
-        "manifest": str(args.manifest),
+        "metadata": str(args.metadata),
         "stack_depth": args.stack_depth,
         "batch_size": args.batch_size,
         "epochs": args.epochs,
@@ -1277,7 +1266,7 @@ def main():
 
     # Initialize Aim logger
     logger = ExperimentLogger(
-        experiment_name="multiclass_segmentation",
+        experiment_name="multimodal_segmentation",
         hyperparams=hyperparams,
         run_name=get_run_name(args),
     )
@@ -1643,7 +1632,6 @@ def main():
                 "val_recall": val_recall,
             }
             # Add per-class metrics
-            class_names = ["prostate", "target"]
             for c, name in enumerate(class_names):
                 best_model_metrics[f"val_dice_{name}"] = val_dice_per_class[c]
                 best_model_metrics[f"val_precision_{name}"] = val_precision_per_class[c]
@@ -1693,7 +1681,7 @@ def main():
     print(f"Training Complete!")
     print(f"Best validation Dice: {best_dice:.4f}")
     print(f"Checkpoints saved to: {output_dir}")
-    print(f"{'='*80}\n")
+    print(f"{ '='*80}\n")
 
 
 if __name__ == "__main__":

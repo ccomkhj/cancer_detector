@@ -5,8 +5,8 @@
 # ===========================
 # Data Configuration
 # ===========================
-manifest: data/processed/class2/manifest.csv
-stack_depth: 5  # Number of slices to stack (2.5D)
+metadata: data/aligned_v2/metadata.json
+stack_depth: 5  # Number of T2 slices to stack (Total channels = stack_depth + 2)
 
 # ===========================
 # Training Configuration
@@ -21,9 +21,9 @@ loss: dice_bce  # Options: dice, bce, dice_bce, focal_tversky
 # ===========================
 # Only used when loss: focal_tversky
 ft_gamma: 1.33  # Focal parameter (reduces loss for easy examples)
-ft_alpha: [0.6, 0.8, 0.8]  # Alpha per class [prostate, target1, target2] - controls FN penalty
-ft_beta: [0.4, 0.2, 0.2]   # Beta per class [prostate, target1, target2] - controls FP penalty
-ft_class_weights: [1.0, 2.0, 2.0]  # Class weights [prostate, target1, target2] - handles class imbalance
+ft_alpha: [0.6, 0.8]  # Alpha per class [prostate, target] - controls FN penalty
+ft_beta: [0.4, 0.2]   # Beta per class [prostate, target] - controls FP penalty
+ft_class_weights: [1.0, 2.0]  # Class weights [prostate, target] - handles class imbalance
 
 # ===========================
 # Model Configuration
@@ -105,9 +105,9 @@ wandb_run_name: null  # Wandb run name (auto-generated if null)
 # epochs: 100
 # loss: focal_tversky
 # ft_gamma: 1.33
-# ft_alpha: [0.6, 0.8, 0.8]
-# ft_beta: [0.4, 0.2, 0.2]
-# ft_class_weights: [1.0, 2.0, 2.0]
+# ft_alpha: [0.6, 0.8]
+# ft_beta: [0.4, 0.2]
+# ft_class_weights: [1.0, 2.0]
 
 # ------------------------------------------------------------------------------
 # EXAMPLE 3: Experimental with Cosine Warm Restarts
@@ -125,9 +125,9 @@ wandb_run_name: null  # Wandb run name (auto-generated if null)
 # ------------------------------------------------------------------------------
 # loss: focal_tversky
 # ft_gamma: 1.5  # Higher focal parameter for harder focusing
-# ft_alpha: [0.7, 0.9, 0.9]  # Favor recall for targets (higher alpha = more FN penalty)
-# ft_beta: [0.3, 0.1, 0.1]   # Reduce FP penalty for targets
-# ft_class_weights: [1.0, 3.0, 3.0]  # Higher weight for target classes
+# ft_alpha: [0.7, 0.9]  # Favor recall for targets (higher alpha = more FN penalty)
+# ft_beta: [0.3, 0.1]   # Reduce FP penalty for targets
+# ft_class_weights: [1.0, 3.0]  # Higher weight for target classes
 # scheduler: onecycle
 # lr: 0.00005
 # scheduler_max_lr_mult: 15.0  # More aggressive LR cycling

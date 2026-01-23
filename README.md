@@ -1,8 +1,6 @@
-# MRI 2.5D Segmentation Pipeline
+# MRI Multi-Modal 2.5D Segmentation Pipeline
 
-End-to-end pipeline for training multi-class segmentation models on prostate MRI data from TCIA.
-
-
+End-to-end pipeline for training multi-modal (T2 + ADC + Calc) segmentation models on prostate MRI data.
 
 > **⚠️ Work in Progress**  
 > This project is currently under active development. If you're interested in using this pipeline for your research or have questions about the implementation, please contact the author.
@@ -13,6 +11,9 @@ End-to-end pipeline for training multi-class segmentation models on prostate MRI
 ```
 mri/
 ├── data/
+│   ├── aligned_v2/             # Multi-modal training data (T2+ADC+Calc)
+│   │   ├── class{1,2,3,4}/
+│   │   └── metadata.json      # Training metadata
 │   ├── raw/                    # Raw Excel files
 │   │   ├── selected_patients_3.xlsx
 │   │   └── Prostate-MRI-US-Biopsy-NBIA-manifest_v2_20231020-nbia-digest.xlsx
@@ -54,6 +55,7 @@ mri/
 │   │   ├── generate_tcia_by_study.py     # By full study
 │   │   └── README_TCIA_GENERATOR.md      # TCIA documentation
 │   ├── dataset/                # PyTorch dataset loaders
+│   │   ├── dataset_multimodal.py         # Multi-modal (T2+ADC+Calc) dataset
 │   │   ├── dataset_2d5_multiclass.py     # Multi-class 2.5D dataset
 │   │   ├── dataset_2d5_with_seg.py       # 2.5D with segmentation
 │   │   ├── dataset_2d5.py                # Basic 2.5D dataset
@@ -95,9 +97,9 @@ Checks data integrity and creates visualizations with color-coded masks
 python service/train.py --config config.yaml
 
 # Option 2: CLI arguments
-python service/train.py --manifest data/processed/class2/manifest.csv --epochs 50
+python service/train.py --metadata data/aligned_v2/metadata.json --epochs 50
 ```
-Trains multi-class segmentation (Prostate + Target1 + Target2 together)
+Trains multi-modal segmentation (Prostate + Target) using T2, ADC, and Calc sequences.
 
 ---
 
@@ -334,20 +336,20 @@ python service/validate_data.py
 ✓ Shows mask statistics per class  
 ✓ Color legend: 🟡 Prostate, 🔴 Target1, 🟠 Target2
 
-**Train Multi-Class Model:**
+**Train Multi-Modal Model:**
 ```bash
 # Using config file (recommended)
 python service/train.py --config config.yaml
 
 # Or with CLI args
 python service/train.py \
-    --manifest data/processed/class2/manifest.csv \
+    --metadata data/aligned_v2/metadata.json \
     --batch_size 8 \
     --epochs 50 \
     --scheduler onecycle
 ```
-✓ Trains on all 3 classes simultaneously  
-✓ Advanced LR schedulers + validation visualizations  
+✓ Trains on all classes simultaneously  
+✓ Uses 7-channel input (T2 Context + ADC + Calc)  
 ✓ Saves checkpoints to `checkpoints/`  
 ✓ Logs to Aim for experiment tracking
 
@@ -377,13 +379,16 @@ pip install -r requirements.txt
 
 ## 🎯 Model Architecture
 
-**Input:** 2.5D stacks (5 adjacent slices)  
-**Output:** 3-channel segmentation (prostate, target1, target2)  
+**Input:** Multi-Modal 2.5D Stack (7 channels)
+  - 5 T2-weighted context slices
+  - 1 ADC slice (center)
+  - 1 Calc slice (center)
+**Output:** 2-channel segmentation (Prostate, Target)
 **Network:** U-Net with encoder-decoder + skip connections
 
 ```python
-Input:  (batch, 5, 256, 256)   # 5 stacked slices
-Output: (batch, 3, 256, 256)   # 3 segmentation masks
+Input:  (batch, 7, 256, 256)   # 5 T2 + 1 ADC + 1 Calc
+Output: (batch, 2, 256, 256)   # Channel 0: Prostate, Channel 1: Target
 ```
 
 ---
