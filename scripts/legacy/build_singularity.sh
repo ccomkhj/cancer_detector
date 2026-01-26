@@ -504,3 +504,10 @@ echo "  3. Or test interactively:"
 echo "     ${SINGULARITY_CMD} shell ${SINGULARITY_IMAGE}"
 echo ""
 echo "============================================================================"
+
+
+
+
+
+
+

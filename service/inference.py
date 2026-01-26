@@ -49,6 +49,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tools.dataset.dataset_2d5 import MRI25DDataset, collate_fn_with_none
 
 
+def _is_mri_config(config_path: str) -> bool:
+    try:
+        import yaml
+
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f) or {}
+        return isinstance(cfg.get("task"), dict) and isinstance(cfg.get("data"), dict)
+    except Exception:
+        return False
+
+
 class SegmentationInference:
     """Inference engine for segmentation."""
     
@@ -314,6 +325,18 @@ def load_model_from_checkpoint(checkpoint_path: str, device: str) -> tuple:
 
 def main():
     parser = argparse.ArgumentParser(description="Run Inference with 2.5D Segmentation Model")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to nested MRI YAML config (dispatches to mri/cli/infer.py)",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default=None,
+        help="Split key to use with nested MRI config (e.g., train/val/test)",
+    )
     
     # Model
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint")
@@ -337,6 +360,16 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     
     args = parser.parse_args()
+
+    if args.config and _is_mri_config(args.config):
+        from mri.cli.infer import main as mri_infer_main
+
+        print("Detected nested MRI config. Dispatching to mri/cli/infer.py ...")
+        cli_args = ["--config", args.config]
+        if args.split:
+            cli_args += ["--split", args.split]
+        mri_infer_main(cli_args)
+        return
     
     print("="*80)
     print("2.5D MRI Segmentation Inference")
@@ -451,4 +484,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

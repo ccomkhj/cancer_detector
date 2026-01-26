@@ -1,0 +1,54 @@
+task:
+  name: segmentation
+  stage: train
+
+data:
+  metadata: data/aligned_v2/metadata.json
+  split_file: null
+  modalities: [t2, adc, calc]
+  zero_pad_missing: true
+  stack_depth: 5
+  seg_pred_dir: null
+  selection:
+    method: center_crop_pad
+    top_k: 16
+    min_prob: 0.3
+    source: pred
+    jitter: 2
+  depth:
+    strategy: center_crop_pad
+    depth: 16
+  roi:
+    crop_size: 192
+    output_size: 256
+    use_roi: true
+  num_workers: 4
+
+model:
+  name: simple_unet
+  params: {}
+
+augment:
+  name: none
+  params: {}
+
+train:
+  batch_size: 4
+  epochs: 20
+  lr: 1e-4
+  weight_decay: 1e-4
+  device: auto
+  output_dir: checkpoints
+
+loss:
+  name: cross_entropy
+  params: {}
+
+metrics:
+  names: []
+
+inference:
+  batch_size: 4
+  device: auto
+  output_dir: predictions
+  checkpoint: null

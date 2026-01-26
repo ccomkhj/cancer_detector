@@ -103,6 +103,44 @@ Trains multi-modal segmentation (Prostate + Target) using T2, ADC, and Calc sequ
 
 ---
 
+## 🧩 Scalable Pipeline (Segmentation + Classification)
+
+This repo now includes a modular pipeline under `mri/` that supports:
+- Segmentation with MONAI backbones
+- Per-case classification (C=3 modalities, D=16) driven by segmentation predictions
+
+### 1. Generate split files (YAML)
+```bash
+python tools/generate_splits.py --metadata data/aligned_v2/metadata.json --output data/splits/seg_cases.yaml
+python tools/generate_splits.py --metadata data/aligned_v2/metadata.json --output data/splits/cls_cases.yaml
+```
+
+### 2. Train Segmentation (nested config)
+```bash
+python service/train.py --config mri/config/task/segmentation.yaml
+```
+
+### 3. Run Segmentation Inference (export predictions)
+This creates per-case `prostate_prob.npy` and `target_prob.npy` files.
+```bash
+python service/inference.py --config mri/config/task/segmentation.yaml --split test
+```
+
+### 4. Train Classification (nested config)
+```bash
+python service/train.py --config mri/config/task/classification.yaml
+```
+
+### 5. Run Classification Inference
+```bash
+python service/inference.py --config mri/config/task/classification.yaml --split test
+```
+
+Notes:
+- Classification uses **center_crop_pad** with **D=16**, ROI **192→256**, and **C=3** (T2/ADC/CALC).
+- Missing ADC/CALC is zero-padded.
+- No-target cases are labeled as class **0**.
+
 ## ☁️ Cloud Deployment
 
 Deploy training pipeline on cloud machines (AWS, GCP, Azure):

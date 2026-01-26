@@ -30,3 +30,4 @@ aim>=3.17.0
 
 wandb
 weave
+loguru
