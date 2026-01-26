@@ -49,6 +49,7 @@ set -e  # Exit on error
 USE_SINGULARITY=${USE_SINGULARITY:-1}
 
 # Singularity image path (build with: scripts/build_singularity.sh)
+# Loaded from .env file or environment variable, with fallback to default
 SINGULARITY_IMAGE=${SINGULARITY_IMAGE:-"mri-train.sif"}
 
 # Conda environment name (if not using Singularity)
@@ -106,6 +107,16 @@ if [[ -f ".env" ]]; then
             if [[ -d "/p/scratch/ebrains-0000006/kim27" ]]; then
                 export WANDB_DIR="/p/scratch/ebrains-0000006/kim27/wandb"
             fi
+        fi
+    fi
+
+    # Singularity image path (for HPC container execution)
+    # Option 1: Export before submitting: export SINGULARITY_IMAGE="/path/to/image.sif"
+    # Option 2: Store in .env file: SINGULARITY_IMAGE=/path/to/image.sif
+    if [[ -z "${SINGULARITY_IMAGE}" ]]; then
+        ENV_SINGULARITY_IMAGE=$(grep "^SINGULARITY_IMAGE=" .env | cut -d'=' -f2-)
+        if [[ -n "${ENV_SINGULARITY_IMAGE}" ]]; then
+            export SINGULARITY_IMAGE="${ENV_SINGULARITY_IMAGE}"
         fi
     fi
 else

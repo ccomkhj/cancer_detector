@@ -175,7 +175,22 @@ fi
 
 # SCRIPT_DIR is already absolute, so this path is also absolute
 # Use it directly to ensure sbatch can find it regardless of working directory
-exec sbatch ${SBATCH_OPTS} --export=PROJECT_DIR="${PROJECT_DIR}",DATA_DIR="${DATA_DIR}",CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_DIR}/checkpoints}",WANDB_DIR="${WANDB_DIR:-}",WANDB_MODE="${WANDB_MODE}" "${SUBMIT_SLURM_SCRIPT}" ${WANDB_ARGS} ${SCRIPT_ARGS}
+# Pass USE_SINGULARITY (default: 1 for Singularity container mode)
+USE_SINGULARITY=${USE_SINGULARITY:-1}
+
+# Load Singularity image path from .env (or use default)
+if [[ -z "${SINGULARITY_IMAGE}" ]]; then
+    ENV_SINGULARITY_IMAGE=$(grep "^SINGULARITY_IMAGE=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2-)
+    if [[ -n "${ENV_SINGULARITY_IMAGE}" ]]; then
+        SINGULARITY_IMAGE="${ENV_SINGULARITY_IMAGE}"
+    elif [[ -f "${PROJECT_DIR}/mri-train.sif" ]]; then
+        SINGULARITY_IMAGE="${PROJECT_DIR}/mri-train.sif"
+    else
+        SINGULARITY_IMAGE="mri-train.sif"
+    fi
+fi
+
+exec sbatch ${SBATCH_OPTS} --export=PROJECT_DIR="${PROJECT_DIR}",DATA_DIR="${DATA_DIR}",CHECKPOINT_DIR="${CHECKPOINT_DIR:-${PROJECT_DIR}/checkpoints}",WANDB_DIR="${WANDB_DIR:-}",WANDB_MODE="${WANDB_MODE}",USE_SINGULARITY="${USE_SINGULARITY}",SINGULARITY_IMAGE="${SINGULARITY_IMAGE}" "${SUBMIT_SLURM_SCRIPT}" ${WANDB_ARGS} ${SCRIPT_ARGS}
 
 
 
