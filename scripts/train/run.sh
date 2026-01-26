@@ -28,6 +28,7 @@ set +a
 # Defaults (can be overridden by .env)
 SINGULARITY_IMAGE=${SINGULARITY_IMAGE:-"${PROJECT_DIR}/mri-train.sif"}
 DATA_DIR=${DATA_DIR:-"${PROJECT_DIR}/data"}
+SPLITS_DIR=${SPLITS_DIR:-"${PROJECT_DIR}/data/splits"}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-"${PROJECT_DIR}/checkpoints"}
 WANDB_DIR=${WANDB_DIR:-"${PROJECT_DIR}/wandb"}
 WANDB_MODE=${WANDB_MODE:-"offline"}
@@ -69,6 +70,7 @@ mkdir -p "${CHECKPOINT_DIR}" "${WANDB_DIR}" "${PROJECT_DIR}/.aim"
 BIND_MOUNTS=(
     "--bind" "${PROJECT_DIR}:/workspace"
     "--bind" "${DATA_DIR}:/workspace/data:ro"
+    "--bind" "${SPLITS_DIR}:/workspace/data/splits:ro"
     "--bind" "${CHECKPOINT_DIR}:/workspace/checkpoints"
     "--bind" "${PROJECT_DIR}/.aim:/workspace/.aim"
     "--bind" "${WANDB_DIR}:/workspace/wandb"
