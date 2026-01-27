@@ -15,11 +15,47 @@
 
 set -e
 
-# Default values
-WANDB_DIR="/p/scratch/ebrains-0000006/kim27/wandb"
+# Get project directory to load .env file
+if [[ -n "${BASH_SOURCE[0]}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Load configuration from .env file
+ENV_FILE="${PROJECT_DIR}/.env"
+if [[ -f "${ENV_FILE}" ]]; then
+    # Load WANDB_API_KEY from .env
+    if [[ -z "${WANDB_API_KEY}" ]]; then
+        if [[ -f "${HOME}/.wandb_api_key" ]]; then
+            export WANDB_API_KEY=$(cat "${HOME}/.wandb_api_key")
+        else
+            export WANDB_API_KEY=$(grep "^WANDB_API_KEY=" "${ENV_FILE}" | cut -d'=' -f2-)
+        fi
+    fi
+    
+    # Load WANDB_DIR from .env (try WANDB_DIR first, then WANDB_PATH as fallback)
+    if [[ -z "${WANDB_DIR}" ]]; then
+        ENV_WANDB_DIR=$(grep "^WANDB_DIR=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2-)
+        if [[ -z "${ENV_WANDB_DIR}" ]]; then
+            ENV_WANDB_DIR=$(grep "^WANDB_PATH=" "${ENV_FILE}" 2>/dev/null | cut -d'=' -f2-)
+        fi
+        if [[ -n "${ENV_WANDB_DIR}" ]]; then
+            WANDB_DIR="${ENV_WANDB_DIR}"
+        fi
+    fi
+else
+    # Fallback: load wandb API key from file if no .env
+    if [[ -z "${WANDB_API_KEY}" ]] && [[ -f "${HOME}/.wandb_api_key" ]]; then
+        export WANDB_API_KEY=$(cat "${HOME}/.wandb_api_key")
+    fi
+fi
+
+# Default values (use .env values if loaded, otherwise use defaults)
+WANDB_DIR="${WANDB_DIR:-/p/scratch/ebrains-0000006/kim27/wandb}"
 SYNC_SPECIFIC_RUN=""
 CHECK_STATUS=0
-WANDB_API_KEY="8febfa084f6334dd743ecec30c3fcaa4de05cab1"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do

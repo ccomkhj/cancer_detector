@@ -29,21 +29,30 @@
 
 set -e
 
-# Get project directory first so we can read .env from the correct location
-# Get script directory - handle both direct execution and sbatch execution
-if [[ -n "${BASH_SOURCE[0]}" ]]; then
+# Get project directory - SLURM copies scripts to spool, so we can't rely on BASH_SOURCE
+# Use SLURM_SUBMIT_DIR if available (set by sbatch to the directory where sbatch was called)
+if [[ -n "${SLURM_SUBMIT_DIR}" ]]; then
+    PROJECT_DIR="${SLURM_SUBMIT_DIR}"
+elif [[ -n "${BASH_SOURCE[0]}" ]] && [[ "${BASH_SOURCE[0]}" != /var/spool/* ]]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 else
-    # Fallback if BASH_SOURCE is not available
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    # Fallback: try common locations
+    if [[ -d "/p/home/jusers/kim27/jusuf/shared/MRI_2.5D_Segmentation" ]]; then
+        PROJECT_DIR="/p/home/jusers/kim27/jusuf/shared/MRI_2.5D_Segmentation"
+    else
+        echo "ERROR: Cannot determine project directory"
+        exit 1
+    fi
 fi
-PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # Change to project directory to ensure .env file is found
 cd "${PROJECT_DIR}" || {
     echo "ERROR: Cannot change to project directory: ${PROJECT_DIR}"
     exit 1
 }
+
+echo "Project directory: ${PROJECT_DIR}"
 
 # Load configuration from .env file (now we're in the project directory)
 ENV_FILE="${PROJECT_DIR}/.env"
