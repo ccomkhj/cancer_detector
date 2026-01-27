@@ -116,14 +116,13 @@ def get_scheduler(optimizer, scheduler_type, total_epochs, steps_per_epoch, args
             T_0=args.scheduler_t0,  # Number of epochs for first restart
             T_mult=args.scheduler_tmult,  # Multiply T_0 after each restart
             eta_min=args.scheduler_min_lr,
-            verbose=False,
         )
         return scheduler, "epoch"
 
     elif scheduler_type == "cosine_simple":
         # Simple cosine annealing (no restarts)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=total_epochs, eta_min=args.scheduler_min_lr, verbose=False
+            optimizer, T_max=total_epochs, eta_min=args.scheduler_min_lr
         )
         return scheduler, "epoch"
 
@@ -137,7 +136,6 @@ def get_scheduler(optimizer, scheduler_type, total_epochs, steps_per_epoch, args
             anneal_strategy="cos",
             div_factor=args.scheduler_div_factor,
             final_div_factor=args.scheduler_final_div_factor,
-            verbose=False,
         )
         return scheduler, "batch"
 
@@ -147,14 +145,13 @@ def get_scheduler(optimizer, scheduler_type, total_epochs, steps_per_epoch, args
             optimizer,
             step_size=args.scheduler_step_size,
             gamma=args.scheduler_factor,
-            verbose=False,
         )
         return scheduler, "epoch"
 
     elif scheduler_type == "exponential":
         # Exponential decay
         scheduler = optim.lr_scheduler.ExponentialLR(
-            optimizer, gamma=args.scheduler_factor, verbose=False
+            optimizer, gamma=args.scheduler_factor
         )
         return scheduler, "epoch"
 
@@ -651,9 +648,16 @@ def validate_epoch(
             avg_dice = float(mean_dice)
 
         if isinstance(per_class_dice, torch.Tensor):
-            per_class_dice_list = per_class_dice.tolist()
+            # Flatten if needed (MONAI may return shape [C, 1] instead of [C])
+            per_class_dice_flat = per_class_dice.flatten()
+            per_class_dice_list = per_class_dice_flat.tolist()
         else:
             per_class_dice_list = list(per_class_dice)
+        # Ensure we have flat scalars, not nested lists
+        per_class_dice_list = [
+            float(x[0]) if isinstance(x, (list, tuple)) else float(x)
+            for x in per_class_dice_list
+        ]
     else:
         # Fallback: use accumulated batch-averaged Dice
         avg_dice = total_dice / max(num_batches, 1) if num_batches > 0 else 0.0
