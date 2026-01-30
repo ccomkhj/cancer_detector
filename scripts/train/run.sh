@@ -95,4 +95,4 @@ echo "  Pretrained weights cache: ${PRETRAINED_CACHE_DIR}"
     --env TORCH_HOME="/workspace/pretrained_cache/torch" \
     --env HF_HOME="/workspace/pretrained_cache/huggingface" \
     "${SINGULARITY_IMAGE}" \
-    bash -c "cd /workspace && pip install -r requirements.txt && python service/train.py --config ${CONFIG} ${PY_ARGS[*]}"
+    bash -c "cd /workspace && python service/train.py --config ${CONFIG} ${PY_ARGS[*]}"
