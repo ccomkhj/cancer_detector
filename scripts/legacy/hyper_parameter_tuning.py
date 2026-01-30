@@ -114,7 +114,12 @@ def submit_job(config_overrides: Dict, base_config: Dict) -> Optional[str]:
     for key, value in config_overrides.items():
         # Convert config key format (scheduler_factor) to CLI format (--scheduler_factor)
         arg_key = f"--{key}"
-        cli_args.extend([arg_key, str(value)])
+        # Handle list values (e.g., ft_alpha, ft_beta, ft_class_weights)
+        if isinstance(value, list):
+            cli_args.append(arg_key)
+            cli_args.extend([str(v) for v in value])
+        else:
+            cli_args.extend([arg_key, str(value)])
     
     # Call the script directly - it will handle calling sbatch internally
     # Format: ./scripts/submit_slurm_wandb.sh [SBATCH_OPTS] [TRAINING_ARGS]

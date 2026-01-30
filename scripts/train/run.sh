@@ -32,6 +32,7 @@ SPLITS_DIR=${SPLITS_DIR:-"${PROJECT_DIR}/data/splits"}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-"${PROJECT_DIR}/checkpoints"}
 WANDB_DIR=${WANDB_DIR:-"${PROJECT_DIR}/wandb"}
 WANDB_MODE=${WANDB_MODE:-"offline"}
+PRETRAINED_CACHE_DIR=${PRETRAINED_CACHE_DIR:-"${PROJECT_DIR}/pretrained_model"}
 
 CONFIG="mri/config/task/segmentation.yaml"
 PY_ARGS=()
@@ -67,6 +68,11 @@ fi
 
 mkdir -p "${CHECKPOINT_DIR}" "${WANDB_DIR}" "${PROJECT_DIR}/.aim"
 
+# Cache directories for pretrained weights (stored in scratch to avoid quota issues)
+TORCH_CACHE="${PRETRAINED_CACHE_DIR}/torch"
+HF_CACHE="${PRETRAINED_CACHE_DIR}/huggingface"
+mkdir -p "${TORCH_CACHE}" "${HF_CACHE}"
+
 BIND_MOUNTS=(
     "--bind" "${PROJECT_DIR}:/workspace"
     "--bind" "${DATA_DIR}:/workspace/data:ro"
@@ -74,14 +80,19 @@ BIND_MOUNTS=(
     "--bind" "${CHECKPOINT_DIR}:/workspace/checkpoints"
     "--bind" "${PROJECT_DIR}/.aim:/workspace/.aim"
     "--bind" "${WANDB_DIR}:/workspace/wandb"
+    # Mount cache directories for pretrained weights (use scratch space)
+    "--bind" "${PRETRAINED_CACHE_DIR}:/workspace/pretrained_cache"
 )
 
 echo "Running training in container: ${SINGULARITY_IMAGE}"
+echo "  Pretrained weights cache: ${PRETRAINED_CACHE_DIR}"
 "${CONTAINER_CMD}" exec --nv \
     "${BIND_MOUNTS[@]}" \
     --env WANDB_API_KEY="${WANDB_API_KEY}" \
     --env WANDB_MODE="${WANDB_MODE}" \
     --env WANDB_DIR="/workspace/wandb" \
     --env PYTHONPATH="/workspace" \
+    --env TORCH_HOME="/workspace/pretrained_cache/torch" \
+    --env HF_HOME="/workspace/pretrained_cache/huggingface" \
     "${SINGULARITY_IMAGE}" \
     bash -c "cd /workspace && pip install -r requirements.txt && python service/train.py --config ${CONFIG} ${PY_ARGS[*]}"
