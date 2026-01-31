@@ -83,6 +83,14 @@ if [[ -f "${ENV_FILE}" ]]; then
         fi
     fi
 
+    # Pretrained cache directory (load from .env if not set)
+    if [[ -z "${PRETRAINED_CACHE_DIR}" ]]; then
+        ENV_PRETRAINED_CACHE_DIR=$(grep "^PRETRAINED_CACHE_DIR=" "${ENV_FILE}" | cut -d'=' -f2-)
+        if [[ -n "${ENV_PRETRAINED_CACHE_DIR}" ]]; then
+            export PRETRAINED_CACHE_DIR="${ENV_PRETRAINED_CACHE_DIR}"
+        fi
+    fi
+
     # Set up WandB directory (use scratch space to avoid home directory quota)
     if [[ -z "${WANDB_DIR}" ]]; then
         # Try WANDB_DIR first, then WANDB_PATH as fallback
@@ -183,6 +191,7 @@ fi
 export PROJECT_DIR="${PROJECT_DIR}"
 export DATA_DIR="${DATA_DIR}"
 export CHECKPOINT_DIR="${CHECKPOINT_DIR}"
+export PRETRAINED_CACHE_DIR="${PRETRAINED_CACHE_DIR:-${PROJECT_DIR}/pretrained_model}"
 export WANDB_DIR="${WANDB_DIR}"
 export WANDB_MODE="${WANDB_MODE}"
 export USE_SINGULARITY="${USE_SINGULARITY}"

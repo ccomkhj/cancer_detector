@@ -54,6 +54,111 @@ from tools.dataset.dataset_multimodal import (
     create_multimodal_dataloader,
 )
 
+# Try to import segmentation_models_pytorch for advanced architectures
+try:
+    import segmentation_models_pytorch as smp
+    SMP_AVAILABLE = True
+except ImportError:
+    SMP_AVAILABLE = False
+
+
+def create_model(model_name: str, in_channels: int, out_channels: int = 2):
+    """
+    Create a segmentation model based on the model name.
+
+    Supported models:
+        - simple_unet: Custom SimpleUNet
+        - smp_unet_<encoder>: SMP UNet with specified encoder (e.g., resnet34)
+        - smp_unetplusplus_<encoder>: SMP UNet++ with specified encoder
+        - smp_deeplabv3plus_<encoder>: SMP DeepLabV3+ with specified encoder
+        - smp_fpn_<encoder>: SMP FPN with specified encoder
+        - smp_manet_<encoder>: SMP MANet with specified encoder
+        - smp_linknet_<encoder>: SMP Linknet with specified encoder
+
+    Args:
+        model_name: Name of the model (e.g., "simple_unet", "smp_unet_resnet34")
+        in_channels: Number of input channels
+        out_channels: Number of output classes
+
+    Returns:
+        PyTorch model
+    """
+    model_name_lower = model_name.lower()
+
+    if model_name_lower == "simple_unet":
+        print(f"  Creating SimpleUNet (in_channels={in_channels}, out_channels={out_channels})")
+        return SimpleUNet(in_channels=in_channels, out_channels=out_channels)
+
+    # Parse SMP model format: smp_<architecture>_<encoder>
+    if model_name_lower.startswith("smp_"):
+        if not SMP_AVAILABLE:
+            raise ImportError(
+                f"segmentation_models_pytorch is required for {model_name}. "
+                "Install with: pip install segmentation-models-pytorch"
+            )
+
+        # Parse architecture and encoder from model name
+        parts = model_name_lower.split("_", 2)  # Split into max 3 parts
+        if len(parts) < 3:
+            raise ValueError(
+                f"Invalid SMP model name format: {model_name}. "
+                "Expected format: smp_<architecture>_<encoder> (e.g., smp_unet_resnet34)"
+            )
+
+        _, architecture, encoder = parts
+
+        # Map architecture names to SMP classes
+        smp_architectures = {
+            "unet": smp.Unet,
+            "unetplusplus": smp.UnetPlusPlus,
+            "deeplabv3plus": smp.DeepLabV3Plus,
+            "fpn": smp.FPN,
+            "manet": smp.MAnet,
+            "linknet": smp.Linknet,
+            "pspnet": smp.PSPNet,
+        }
+
+        if architecture not in smp_architectures:
+            available = ", ".join(smp_architectures.keys())
+            raise ValueError(
+                f"Unknown SMP architecture: {architecture}. "
+                f"Available: {available}"
+            )
+
+        model_class = smp_architectures[architecture]
+
+        # Try to load with ImageNet pretrained weights
+        encoder_weights = "imagenet"
+        try:
+            model = model_class(
+                encoder_name=encoder,
+                encoder_weights=encoder_weights,
+                in_channels=in_channels,
+                classes=out_channels,
+                activation=None,  # We use logits, not probabilities
+            )
+            print(f"  Creating SMP {architecture.upper()} with {encoder} encoder (pretrained)")
+        except Exception as e:
+            # Fall back to random initialization if pretrained weights fail
+            print(f"  Warning: Could not load pretrained weights: {e}")
+            print(f"  Falling back to random initialization")
+            model = model_class(
+                encoder_name=encoder,
+                encoder_weights=None,
+                in_channels=in_channels,
+                classes=out_channels,
+                activation=None,
+            )
+            print(f"  Creating SMP {architecture.upper()} with {encoder} encoder (random init)")
+
+        return model
+
+    # Unknown model
+    raise ValueError(
+        f"Unknown model: {model_name}. "
+        "Supported: simple_unet, smp_unet_<encoder>, smp_unetplusplus_<encoder>, etc."
+    )
+
 
 def _is_mri_config(config_path: str) -> bool:
     try:
@@ -1268,9 +1373,11 @@ def main():
     print("Creating model...")
     # Input channels: T2 stack (stack_depth) + ADC (1) + Calc (1)
     in_channels = args.stack_depth + 2
-    model = SimpleUNet(
-        in_channels=in_channels, out_channels=2
-    )  # 2 classes: prostate, target
+    model = create_model(
+        model_name=args.model,
+        in_channels=in_channels,
+        out_channels=2,  # 2 classes: prostate, target
+    )
     model = model.to(device)
 
     # Count parameters

@@ -41,8 +41,12 @@ class EpochMetrics:
 
 
 # Model parameter counts for inference (approximate)
+# Note: Parameter counts vary slightly with stack_depth changes
+# These are base counts for stack_depth=5 (default)
 MODEL_PARAMS = {
-    31045890: "simple_unet",
+    31045890: "simple_unet",      # stack_depth=5
+    31044738: "simple_unet",      # stack_depth=5 (slight variation)
+    31047042: "simple_unet",      # stack_depth=7
     24439070: "smp_unet_resnet34",
     32525154: "smp_unet_resnet50",
     16803906: "smp_unet_efficientnet-b0",
@@ -100,7 +104,6 @@ def parse_log_file(filepath: Path) -> Optional[TrainingRun]:
     run.completed = "Training Complete!" in content or "Job Complete" in content
 
     config_patterns = {
-        'model': r'^\s+model:\s*(\S+)',
         'epochs': r'Epochs:\s*(\d+)',
         'lr': r'Learning rate:\s*([\d.e-]+)',
         'batch_size': r'Batch size:\s*(\d+)',
@@ -124,6 +127,32 @@ def parse_log_file(filepath: Path) -> Optional[TrainingRun]:
                 setattr(run, key, int(value.replace(',', '')))
             else:
                 setattr(run, key, value)
+
+    # Parse model name with multiple fallback patterns
+    model_patterns = [
+        # Pattern 1: "Key Hyperparameters" section (new format)
+        r'---\s*Key Hyperparameters.*?model:\s*(\S+)',
+        # Pattern 2: Config section with indentation
+        r'^\s+model:\s*(\S+)',
+        # Pattern 3: Creating SMP model message
+        r'Creating SMP (\w+) with (\S+) encoder',
+        # Pattern 4: Creating SimpleUNet message
+        r'Creating (SimpleUNet)',
+    ]
+
+    for i, pattern in enumerate(model_patterns):
+        flags = re.MULTILINE | re.DOTALL if '.*?' in pattern else re.MULTILINE
+        match = re.search(pattern, content, flags)
+        if match:
+            if i == 2:  # SMP pattern with architecture and encoder
+                arch = match.group(1).lower()
+                encoder = match.group(2)
+                run.model = f"smp_{arch}_{encoder}"
+            elif i == 3:  # SimpleUNet
+                run.model = "simple_unet"
+            else:
+                run.model = match.group(1)
+            break
 
     for key in ['ft_alpha', 'ft_beta', 'ft_class_weights']:
         match = re.search(rf'{key}:\s*\[([\d., ]+)\]', content)
