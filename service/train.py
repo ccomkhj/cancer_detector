@@ -948,6 +948,15 @@ def merge_config_with_args(args):
             setattr(args, key, value)
             print(f"  {key}: {value}")
 
+    # Always print key hyperparameters for easier log analysis
+    print("\n  --- Key Hyperparameters (final values) ---")
+    print(f"  model: {args.model}")
+    print(f"  loss: {args.loss}")
+    print(f"  scheduler: {args.scheduler}")
+    print(f"  lr: {args.lr}")
+    print(f"  epochs: {args.epochs}")
+    print(f"  batch_size: {args.batch_size}")
+
     print()
     return args
 
@@ -996,12 +1005,12 @@ def create_argument_parser():
 
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=50, help="Number of epochs")
+    parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")  # Increased from 50 based on analysis
     parser.add_argument("--lr", type=float, default=5 * 1e-5, help="Learning rate")
     parser.add_argument(
         "--loss",
         type=str,
-        default="dice_bce",
+        default="focal_tversky",  # Changed from dice_bce based on analysis (0.606 vs 0.128 max dice)
         choices=["dice", "bce", "dice_bce", "focal_tversky"],
         help="Loss function",
     )
@@ -1039,7 +1048,7 @@ def create_argument_parser():
     parser.add_argument(
         "--scheduler",
         type=str,
-        default="reduce_on_plateau",
+        default="onecycle",  # Changed from reduce_on_plateau based on analysis (0.606 vs 0.527 max dice)
         choices=[
             "none",
             "reduce_on_plateau",
@@ -1084,7 +1093,7 @@ def create_argument_parser():
     parser.add_argument(
         "--scheduler_max_lr_mult",
         type=float,
-        default=10.0,
+        default=15.0,  # Increased from 10.0 based on best v1 results
         help="Max LR multiplier for OneCycleLR (max_lr = lr * mult)",
     )
     parser.add_argument(
@@ -1423,15 +1432,18 @@ def main():
                 "\n⚠️  wandb/weave not installed. Install with: pip install wandb weave"
             )
             print("   wandb logging will be disabled.\n")
-        elif not os.environ.get("WANDB_API_KEY"):
-            print("\n⚠️  WANDB_API_KEY not set.")
-            print("   Set it with: export WANDB_API_KEY='<your_key>'")
-            print("   Find your key at: https://wandb.ai/authorize")
-            print("   wandb logging will be disabled.\n")
         else:
             try:
                 # Check if we're in offline mode (for HPC clusters without internet)
                 wandb_mode = os.environ.get("WANDB_MODE", "online")
+
+                # API key is only required for online mode
+                if not os.environ.get("WANDB_API_KEY") and wandb_mode != "offline":
+                    print("\n⚠️  WANDB_API_KEY not set and not in offline mode.")
+                    print("   Set it with: export WANDB_API_KEY='<your_key>'")
+                    print("   Find your key at: https://wandb.ai/authorize")
+                    print("   Switching to offline mode.\n")
+                    wandb_mode = "offline"
 
                 # Initialize weave for tracking (skip if offline)
                 weave_project = args.wandb_project
@@ -1469,7 +1481,13 @@ def main():
                 print(f"\n✓ Wandb/Weave logging initialized")
                 print(f"  Project: {weave_project}")
                 print(f"  Run: {wandb_run_name}")
-                print(f"  URL: {wandb_run.get_url()}")
+                print(f"  Mode: {wandb_mode}")
+                if wandb_mode == "offline":
+                    wandb_dir = os.environ.get("WANDB_DIR", "./wandb")
+                    print(f"  Offline logs: {wandb_dir}/wandb/")
+                    print(f"  Sync later with: wandb sync {wandb_dir}/wandb/offline-run-*")
+                else:
+                    print(f"  URL: {wandb_run.get_url()}")
                 print()
             except Exception as e:
                 print(f"\n⚠️  Failed to initialize wandb: {e}")
