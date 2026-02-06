@@ -274,11 +274,17 @@ def get_current_lr(optimizer):
 # ===========================
 
 
+def _is_missing_channel(channel_data: np.ndarray, atol: float = 1e-6) -> bool:
+    """Check if a channel is missing (all-zero or constant after normalization)."""
+    return channel_data.max() - channel_data.min() < atol
+
+
 def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4):
     """
     Create visualization of predictions vs ground truth
 
     Visualizes T2 (Center), ADC, Calc, and Predictions.
+    Missing modalities (all-zero / constant channels) are annotated as "N/A".
 
     Args:
         images: (B, C, H, W) - input images (C=7: 5 T2 + 1 ADC + 1 Calc)
@@ -302,16 +308,23 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
     visualizations = {}
 
     # Identify channel indices
-    # T2 context is 0-4 (depth 5). Center T2 is at index 2.
-    # ADC is at index 5.
-    # Calc is at index 6.
-    # We should make this robust to stack_depth, but assuming 5 for now.
     stack_depth = images.shape[1] - 2
     t2_idx = stack_depth // 2
     adc_idx = stack_depth
     calc_idx = stack_depth + 1
 
-    for idx in range(batch_size):
+    # --- Reorder samples so those with ADC/Calc come first ---
+    sample_indices = list(range(images.shape[0]))
+    def _has_modality(idx):
+        """Score: 2 = both ADC+Calc, 1 = one of them, 0 = neither."""
+        adc = images[idx, adc_idx].cpu().numpy()
+        calc = images[idx, calc_idx].cpu().numpy()
+        return int(not _is_missing_channel(adc)) + int(not _is_missing_channel(calc))
+
+    sample_indices.sort(key=_has_modality, reverse=True)
+    sample_indices = sample_indices[:batch_size]
+
+    for vis_idx, idx in enumerate(sample_indices):
         # Get slices
         t2_img = images[idx, t2_idx].cpu().numpy()
         adc_img = images[idx, adc_idx].cpu().numpy()
@@ -320,13 +333,17 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
         gt = masks_gt[idx].cpu().numpy()
         pred = masks_pred[idx].cpu().numpy()
 
+        # Check which modalities are missing
+        adc_missing = _is_missing_channel(adc_img)
+        calc_missing = _is_missing_channel(calc_img)
+
         # Normalize images for display (min-max)
         def norm(img):
             return (img - img.min()) / (img.max() - img.min() + 1e-8)
 
         t2_disp = norm(t2_img)
-        adc_disp = norm(adc_img)
-        calc_disp = norm(calc_img)
+        adc_disp = norm(adc_img) if not adc_missing else np.zeros_like(adc_img)
+        calc_disp = norm(calc_img) if not calc_missing else np.zeros_like(calc_img)
 
         # Create figure with 2 rows, 4 columns
         fig, axes = plt.subplots(2, 4, figsize=(20, 10))
@@ -339,13 +356,29 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
 
         # ADC
         axes[0, 1].imshow(adc_disp, cmap="gray")
-        axes[0, 1].set_title("ADC", fontsize=12, fontweight="bold")
+        adc_title = "ADC" if not adc_missing else "ADC (N/A)"
+        axes[0, 1].set_title(adc_title, fontsize=12, fontweight="bold",
+                             color="red" if adc_missing else "black")
         axes[0, 1].axis("off")
+        if adc_missing:
+            axes[0, 1].text(
+                0.5, 0.5, "Missing", transform=axes[0, 1].transAxes,
+                ha="center", va="center", fontsize=16, color="red",
+                fontweight="bold", alpha=0.7,
+            )
 
         # Calc
         axes[0, 2].imshow(calc_disp, cmap="gray")
-        axes[0, 2].set_title("Calc", fontsize=12, fontweight="bold")
+        calc_title = "Calc" if not calc_missing else "Calc (N/A)"
+        axes[0, 2].set_title(calc_title, fontsize=12, fontweight="bold",
+                             color="red" if calc_missing else "black")
         axes[0, 2].axis("off")
+        if calc_missing:
+            axes[0, 2].text(
+                0.5, 0.5, "Missing", transform=axes[0, 2].transAxes,
+                ha="center", va="center", fontsize=16, color="red",
+                fontweight="bold", alpha=0.7,
+            )
 
         # Ground truth overlay on T2
         axes[0, 3].imshow(t2_disp, cmap="gray")
@@ -371,8 +404,10 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
 
         # Prediction overlay on ADC
         axes[1, 1].imshow(adc_disp, cmap="gray")
-        axes[1, 1].imshow(pred_overlay, alpha=0.5)
-        axes[1, 1].set_title("Prediction (on ADC)", fontsize=12, fontweight="bold")
+        if not adc_missing:
+            axes[1, 1].imshow(pred_overlay, alpha=0.5)
+        axes[1, 1].set_title("Prediction (on ADC)", fontsize=12, fontweight="bold",
+                             color="red" if adc_missing else "black")
         axes[1, 1].axis("off")
 
         # Individual class predictions
@@ -408,7 +443,7 @@ def create_prediction_visualization(images, masks_gt, masks_pred, num_samples=4)
 
         plt.tight_layout(rect=[0, 0.03, 1, 1])
 
-        visualizations[f"sample_{idx}"] = fig
+        visualizations[f"sample_{vis_idx}"] = fig
 
     return visualizations
 
@@ -517,22 +552,8 @@ def train_epoch(
 
             logger.log_metrics(batch_metrics, step=global_step, context="train_batch")
 
-        # Log batch-level metrics to wandb (every N batches to reduce overhead)
-        if wandb_run is not None and batch_idx % log_batch_every == 0:
-            global_step = epoch * len(dataloader) + batch_idx
-            wandb_metrics = {
-                "train/batch_loss": loss.item(),
-                "train/batch_dice": dice,
-                "learning_rate": current_lr,
-            }
-            # Add per-class metrics
-            class_names = ["prostate", "target"]
-            for c, name in enumerate(class_names):
-                wandb_metrics[f"train/batch_dice_{name}"] = dice_per_class[c]
-                wandb_metrics[f"train/batch_precision_{name}"] = precision_per_class[c]
-                wandb_metrics[f"train/batch_recall_{name}"] = recall_per_class[c]
-
-            wandb.log(wandb_metrics, step=global_step)
+        # Note: batch-level wandb logging removed to avoid step-monotonicity
+        # conflicts. Batch metrics are still logged via the Aim logger above.
 
     avg_loss = total_loss / max(num_batches, 1)
     avg_dice = total_dice / max(num_batches, 1)
@@ -707,33 +728,8 @@ def validate_epoch(
                     context="val_batch",
                 )
 
-            # Log batch-level metrics to wandb (every N batches to reduce overhead)
-            if wandb_run is not None and batch_idx % log_batch_every == 0:
-                global_step = epoch * len(dataloader) + batch_idx
-                wandb_metrics = {
-                    "val/batch_loss": loss.item(),
-                    "val/batch_dice": dice,
-                    "val/batch_precision": precision,
-                    "val/batch_recall": recall,
-                }
-                # Add per-class metrics
-                class_names = ["prostate", "target"]
-                for c, name in enumerate(class_names):
-                    # Compute per-class dice for batch-level logging
-                    pred = torch.sigmoid(outputs)
-                    pred_binary = (pred > 0.5).float()
-                    pred_c = pred_binary[:, c].reshape(-1)
-                    target_c = masks[:, c].reshape(-1)
-                    intersection = (pred_c * target_c).sum()
-                    dice_c = (2.0 * intersection) / (
-                        pred_c.sum() + target_c.sum() + 1e-8
-                    )
-                    wandb_metrics[f"val/batch_dice_{name}"] = dice_c.item()
-                    wandb_metrics[f"val/batch_precision_{name}"] = precision_per_class[
-                        c
-                    ]
-                    wandb_metrics[f"val/batch_recall_{name}"] = recall_per_class[c]
-                wandb.log(wandb_metrics, step=global_step)
+            # Note: batch-level wandb logging removed to avoid step-monotonicity
+            # conflicts. Batch metrics are still logged via the Aim logger above.
 
             # Save first batch for visualization
             if save_visualizations and batch_idx == 0:
@@ -881,7 +877,7 @@ def validate_epoch(
 
                         # Log table
                         wandb.log(
-                            {f"val/threshold_sweep_{class_name}": table}, step=epoch
+                            {f"val/threshold_sweep_{class_name}": table, "epoch": epoch}
                         )
 
                 # Log plots for the target class
@@ -910,9 +906,9 @@ def validate_epoch(
                                     "threshold",
                                     "dice",
                                     title=f"Target Dice vs Threshold (Epoch {epoch+1})",
-                                )
+                                ),
+                                "epoch": epoch,
                             },
-                            step=epoch,
                         )
 
                         # Precision vs Threshold plot
@@ -929,9 +925,9 @@ def validate_epoch(
                                     "threshold",
                                     "precision",
                                     title=f"Target Precision vs Threshold (Epoch {epoch+1})",
-                                )
+                                ),
+                                "epoch": epoch,
                             },
-                            step=epoch,
                         )
 
                         # Recall vs Threshold plot
@@ -947,9 +943,9 @@ def validate_epoch(
                                     "threshold",
                                     "recall",
                                     title=f"Target Recall vs Threshold (Epoch {epoch+1})",
-                                )
+                                ),
+                                "epoch": epoch,
                             },
-                            step=epoch,
                         )
 
                         # Precision-Recall curve
@@ -965,9 +961,9 @@ def validate_epoch(
                                     "recall",
                                     "precision",
                                     title=f"Target Precision-Recall (Epoch {epoch+1})",
-                                )
+                                ),
+                                "epoch": epoch,
                             },
-                            step=epoch,
                         )
 
                 # Log best threshold scalar metrics
@@ -980,8 +976,8 @@ def validate_epoch(
                             f"val/best_dice_{class_name}": best["dice"],
                             f"val/best_precision_{class_name}": best["precision"],
                             f"val/best_recall_{class_name}": best["recall"],
+                            "epoch": epoch,
                         },
-                        step=epoch,
                     )
 
                 print("  ✓ Logged threshold sweep results to W&B")
@@ -1585,6 +1581,15 @@ def main():
                 # Save config.yaml as artifact if it exists (will be saved later after resolved config is created)
                 # This is handled after output_dir is created
 
+                # Define metric axes so epoch is the default x-axis
+                # This avoids step-monotonicity issues with wandb.log()
+                wandb.define_metric("epoch")
+                wandb.define_metric("train/*", step_metric="epoch")
+                wandb.define_metric("val/*", step_metric="epoch")
+                wandb.define_metric("learning_rate", step_metric="epoch")
+                wandb.define_metric("predictions/*", step_metric="epoch")
+                wandb.define_metric("plots/*", step_metric="epoch")
+
                 print(f"\n✓ Wandb/Weave logging initialized")
                 print(f"  Project: {weave_project}")
                 print(f"  Run: {wandb_run_name}")
@@ -1720,7 +1725,7 @@ def main():
                 wandb_metrics[f"train/dice_{name}"] = train_dice_per_class[c]
                 wandb_metrics[f"train/precision_{name}"] = train_precision_per_class[c]
                 wandb_metrics[f"train/recall_{name}"] = train_recall_per_class[c]
-            wandb.log(wandb_metrics, step=epoch)
+            wandb.log(wandb_metrics)
 
         # Validate
         should_visualize = (epoch + 1) % args.vis_every == 0 or epoch == start_epoch
@@ -1791,7 +1796,7 @@ def main():
                 wandb_metrics[f"val/dice_{name}"] = val_dice_per_class[c]
                 wandb_metrics[f"val/precision_{name}"] = val_precision_per_class[c]
                 wandb_metrics[f"val/recall_{name}"] = val_recall_per_class[c]
-            wandb.log(wandb_metrics, step=epoch)
+            wandb.log(wandb_metrics)
 
         # Log visualizations if generated
         if should_visualize and vis_data[0] is not None:
@@ -1841,7 +1846,8 @@ def main():
 
                 # Log images to wandb
                 if wandb_run is not None and wandb_images:
-                    wandb.log(wandb_images, step=epoch)
+                    wandb_images["epoch"] = epoch
+                    wandb.log(wandb_images)
 
                 print(f"  ✓ Logged {len(visualizations)} validation visualizations")
             except Exception as e:

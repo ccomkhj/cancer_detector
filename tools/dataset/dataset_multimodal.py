@@ -120,11 +120,16 @@ class MultiModalDataset(Dataset):
             return np.zeros((256, 256), dtype=np.float32)
 
     def _normalize(self, image: np.ndarray) -> np.ndarray:
-        """Normalize each channel using global statistics."""
+        """Normalize each channel using global statistics.
+        
+        Channels that are all-zero (missing modality, e.g. no ADC/Calc for this sample)
+        are left as 0.0 so the model receives a clear "data missing" signal rather than
+        a misleading constant ``-mean/std``.
+        """
         if not self.global_stats:
             return image / 255.0 # Fallback
             
-        # T2 channels (0 to stack_depth-1)
+        # T2 channels (0 to stack_depth-1) — always present
         t2_mean = self.global_stats["t2"]["mean"]
         t2_std = self.global_stats["t2"]["std"]
         # Avoid div by zero
@@ -132,19 +137,23 @@ class MultiModalDataset(Dataset):
         
         image[:self.stack_depth] = (image[:self.stack_depth] - t2_mean) / t2_std
         
-        # ADC channel
-        adc_mean = self.global_stats["adc"]["mean"]
-        adc_std = self.global_stats["adc"]["std"]
-        adc_std = adc_std if adc_std > 1e-6 else 1.0
+        # ADC channel — only normalize if data is present (non-zero)
+        adc_ch = image[self.stack_depth]
+        if adc_ch.max() > 0:  # has real data
+            adc_mean = self.global_stats["adc"]["mean"]
+            adc_std = self.global_stats["adc"]["std"]
+            adc_std = adc_std if adc_std > 1e-6 else 1.0
+            image[self.stack_depth] = (adc_ch - adc_mean) / adc_std
+        # else: leave as 0.0 (missing modality)
         
-        image[self.stack_depth] = (image[self.stack_depth] - adc_mean) / adc_std
-        
-        # Calc channel
-        calc_mean = self.global_stats["calc"]["mean"]
-        calc_std = self.global_stats["calc"]["std"]
-        calc_std = calc_std if calc_std > 1e-6 else 1.0
-        
-        image[self.stack_depth+1] = (image[self.stack_depth+1] - calc_mean) / calc_std
+        # Calc channel — only normalize if data is present (non-zero)
+        calc_ch = image[self.stack_depth + 1]
+        if calc_ch.max() > 0:  # has real data
+            calc_mean = self.global_stats["calc"]["mean"]
+            calc_std = self.global_stats["calc"]["std"]
+            calc_std = calc_std if calc_std > 1e-6 else 1.0
+            image[self.stack_depth + 1] = (calc_ch - calc_mean) / calc_std
+        # else: leave as 0.0 (missing modality)
         
         return image
 
