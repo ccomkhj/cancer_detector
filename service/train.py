@@ -46,13 +46,13 @@ from service.metrics import (
     compute_recall,
     initialize_monai_metrics,
 )
+from service.preprocessing import (
+    build_multimodal_preprocessing_config,
+    create_multimodal_dataset,
+)
 
 # Import models and metrics from separate modules
 from service.models import DiceBCELoss, DiceLoss, FocalTverskyLoss, SimpleUNet
-from tools.dataset.dataset_multimodal import (
-    MultiModalDataset,
-    create_multimodal_dataloader,
-)
 
 # Try to import segmentation_models_pytorch for advanced architectures
 try:
@@ -1324,13 +1324,8 @@ def main():
     # Create datasets
     print("Creating multi-modal datasets...")
 
-    train_dataset = MultiModalDataset(
-        metadata_path=args.metadata,
-        stack_depth=args.stack_depth,
-        normalize=True,
-        require_complete=args.require_complete,
-        require_positive=args.require_positive,
-    )
+    preprocessing_config = build_multimodal_preprocessing_config(vars(args))
+    train_dataset = create_multimodal_dataset(preprocessing_config)
 
     # Split train/val (80/20)
     train_size = int(0.8 * len(train_dataset))
