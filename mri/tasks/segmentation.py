@@ -8,8 +8,7 @@ import torch
 import torch.nn as nn
 
 from .base import Task
-from service.metrics import compute_dice_score
-from service.models import DiceLoss, DiceBCELoss, FocalTverskyLoss
+from .segmentation_ops import DiceBCELoss, DiceLoss, FocalTverskyLoss, compute_dice_score
 
 
 class SegmentationTask(Task):

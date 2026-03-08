@@ -68,9 +68,21 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="MRI unified inference CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config")
     parser.add_argument("--split", default="test", help="Split key to run inference on")
+    parser.add_argument("--checkpoint", help="Override inference.checkpoint")
+    parser.add_argument("--output_dir", help="Override inference.output_dir")
+    parser.add_argument("--batch_size", type=int, help="Override inference.batch_size")
+    parser.add_argument("--device", help="Override inference.device")
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
+    if args.checkpoint:
+        cfg["inference"]["checkpoint"] = args.checkpoint
+    if args.output_dir:
+        cfg["inference"]["output_dir"] = args.output_dir
+    if args.batch_size is not None:
+        cfg["inference"]["batch_size"] = args.batch_size
+    if args.device:
+        cfg["inference"]["device"] = args.device
     task_name = cfg["task"]["name"]
     device = resolve_device(cfg["inference"].get("device", "auto"))
 

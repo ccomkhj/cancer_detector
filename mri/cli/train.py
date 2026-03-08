@@ -105,9 +105,24 @@ def _build_dataloaders(cfg: Dict[str, Any], task_name: str):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="MRI unified training CLI")
     parser.add_argument("--config", required=True, help="Path to YAML config")
+    parser.add_argument("--output_dir", help="Override train.output_dir")
+    parser.add_argument("--epochs", type=int, help="Override train.epochs")
+    parser.add_argument("--batch_size", type=int, help="Override train.batch_size")
+    parser.add_argument("--lr", type=float, help="Override train.lr")
+    parser.add_argument("--device", help="Override train.device")
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
+    if args.output_dir:
+        cfg["train"]["output_dir"] = args.output_dir
+    if args.epochs is not None:
+        cfg["train"]["epochs"] = args.epochs
+    if args.batch_size is not None:
+        cfg["train"]["batch_size"] = args.batch_size
+    if args.lr is not None:
+        cfg["train"]["lr"] = args.lr
+    if args.device:
+        cfg["train"]["device"] = args.device
     task_name = cfg["task"]["name"]
 
     device = resolve_device(cfg["train"].get("device", "auto"))

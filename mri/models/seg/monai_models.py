@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover - optional dependency
     DynUNet = SegResNet = UNet = VNet = None
 
 try:
-    from service.models import SimpleUNet
+    from .simple_unet import SimpleUNet
 except Exception:  # pragma: no cover
     SimpleUNet = None
 
