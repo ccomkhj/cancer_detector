@@ -56,8 +56,9 @@ PREDICTIONS_DIR="${PREDICTIONS_DIR:-${PROJECT_DIR}/predictions}"
 WANDB_DIR="${WANDB_DIR:-${PROJECT_DIR}/wandb}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 PRETRAINED_CACHE_DIR="${PRETRAINED_CACHE_DIR:-${PROJECT_DIR}/pretrained_model}"
+MPLCONFIGDIR="${MPLCONFIGDIR:-${PROJECT_DIR}/.cache/matplotlib}"
 
-mkdir -p "${CHECKPOINT_DIR}" "${PREDICTIONS_DIR}" "${WANDB_DIR}" "${PROJECT_DIR}/.aim" "${PRETRAINED_CACHE_DIR}/torch" "${PRETRAINED_CACHE_DIR}/huggingface"
+mkdir -p "${CHECKPOINT_DIR}" "${PREDICTIONS_DIR}" "${WANDB_DIR}" "${PROJECT_DIR}/.aim" "${PRETRAINED_CACHE_DIR}/torch" "${PRETRAINED_CACHE_DIR}/huggingface" "${MPLCONFIGDIR}"
 
 export DATA_DIR
 export CHECKPOINT_DIR
@@ -66,6 +67,7 @@ export WANDB_DIR
 export WANDB_MODE
 export TORCH_HOME="${TORCH_HOME:-${PRETRAINED_CACHE_DIR}/torch}"
 export HF_HOME="${HF_HOME:-${PRETRAINED_CACHE_DIR}/huggingface}"
+export MPLCONFIGDIR
 export PYTHONPATH="${PROJECT_DIR}:${PYTHONPATH:-}"
 
 CONFIG=""
@@ -162,6 +164,7 @@ echo "Mode:       mri/cli"
 echo "Data dir:   ${DATA_DIR}"
 echo "Checkpoints:${CHECKPOINT_DIR}"
 echo "Predictions:${PREDICTIONS_DIR}"
+echo "MPL config: ${MPLCONFIGDIR}"
 echo "SLURM Job:  ${SLURM_JOB_ID:-local}"
 echo "Command:    ${CMD[*]}"
 echo "============================================================================"

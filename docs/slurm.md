@@ -23,4 +23,12 @@ bash scripts/new/train --dry-run --config mri/config/task/segmentation.yaml
 bash scripts/new/inference --dry-run --config mri/config/task/classification.yaml --split test
 ```
 
+## Sweep Runner
+
+```bash
+python mri/cli/sweep.py --config mri/config/sweep/segmentation/stack_depth_grid.yaml --dry-run
+python mri/cli/sweep.py --config mri/config/sweep/segmentation/stack_depth_grid.yaml
+python mri/cli/sweep.py --downstream-config mri/config/sweep/classification/downstream_top1.yaml --dry-run
+```
+
 Container-era SLURM scripts were moved to `archive/scripts/`.
