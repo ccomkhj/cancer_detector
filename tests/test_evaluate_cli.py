@@ -189,3 +189,102 @@ def test_evaluate_cli_visualize_failed_only_renders_failures(tmp_path: Path) -> 
     assert not (visuals / "case_pass.html").exists()
     assert (visuals / "case_fail.html").exists()
     assert (visuals / "index.html").exists()
+
+
+# --------------------------------------------------------------------------- #
+# FROC sweep + operating point (shortlist #3)
+# --------------------------------------------------------------------------- #
+
+def _seed_prob(run_dir: Path, case_id: str, *, lesion_prob, gland_prob) -> None:
+    """Overwrite predictions/<case>/prob.npz with graded probabilities."""
+    pdir = run_dir / "diagnostic" / "predictions" / case_id
+    np.savez_compressed(pdir / "prob.npz",
+                        gland=gland_prob.astype(np.float32),
+                        lesion=lesion_prob.astype(np.float32))
+
+
+def _seed_froc_case(run_dir: Path) -> None:
+    Z, H, W = 3, 8, 8
+    gt = np.zeros((Z, H, W), dtype=np.uint8)
+    gt[0, 0:2, 0:2] = 1  # one GT lesion on slice 0
+    lesion_prob = np.zeros((Z, H, W), dtype=np.float32)
+    lesion_prob[0, 0:2, 0:2] = 0.9   # detected once t <= 0.9
+    lesion_prob[0, 5:7, 5:7] = 0.7   # false positive once t <= 0.7
+    gland_prob = np.ones((Z, H, W), dtype=np.float32)
+    pred = np.zeros((Z, H, W), dtype=np.uint8)
+    pred[0, 0:2, 0:2] = 1
+    _seed_predictions(run_dir, "case_a", gt_lesion=gt, gt_gland=np.zeros_like(gt))
+    _seed_prob(run_dir, "case_a", lesion_prob=lesion_prob, gland_prob=gland_prob)
+    _seed_postprocessed(run_dir, "case_a",
+                        lesion_mask=pred, gland_mask=np.ones_like(gt))
+
+
+def test_evaluate_cli_froc_writes_curve_operating_point_and_plot(tmp_path: Path) -> None:
+    run_dir = _seed_run_dir(tmp_path)
+    _seed_froc_case(run_dir)
+
+    rc = evaluate_cli.main([
+        str(run_dir), "--visualize-only", "none",
+        "--froc", "--froc-thresholds", "0.8", "0.6",
+        "--froc-target-fp", "1.0",
+    ])
+
+    assert rc == 0
+    eval_dir = run_dir / "diagnostic" / "evaluation"
+
+    # Fixed-threshold outputs are still produced.
+    assert (eval_dir / "metrics_by_case.csv").exists()
+    assert (eval_dir / "summary.json").exists()
+
+    # FROC artifacts.
+    assert (eval_dir / "froc.csv").exists()
+    assert (eval_dir / "operating_point.json").exists()
+    assert (eval_dir / "froc.png").exists()
+
+    with (eval_dir / "froc.csv").open() as f:
+        froc_rows = list(csv.DictReader(f))
+    assert list(froc_rows[0].keys()) == [
+        "threshold", "sensitivity", "fp_per_case",
+        "n_gt_lesions", "n_detected", "n_false_positives", "n_cases",
+    ]
+    by_t = {r["threshold"]: r for r in froc_rows}
+    assert by_t["0.8"]["sensitivity"] == "1.0"
+    assert by_t["0.8"]["fp_per_case"] == "0.0"
+    assert by_t["0.6"]["fp_per_case"] == "1.0"
+
+    op = json.loads((eval_dir / "operating_point.json").read_text())
+    # Budget 1.0: both thresholds reach sensitivity 1.0; fewest-FP wins -> 0.8.
+    assert op["operating_point"]["threshold"] == 0.8
+    assert op["operating_point"]["target_met"] is True
+    assert {d["fp_per_case"] for d in op["sensitivity_at_fp_rates"]} == {
+        0.5, 1.0, 2.0, 4.0,
+    }
+
+
+def test_evaluate_cli_froc_off_by_default(tmp_path: Path) -> None:
+    run_dir = _seed_run_dir(tmp_path)
+    _seed_froc_case(run_dir)
+
+    assert evaluate_cli.main([str(run_dir), "--visualize-only", "none"]) == 0
+
+    eval_dir = run_dir / "diagnostic" / "evaluation"
+    assert (eval_dir / "metrics_by_case.csv").exists()
+    assert not (eval_dir / "froc.csv").exists()
+    assert not (eval_dir / "operating_point.json").exists()
+    assert not (eval_dir / "froc.png").exists()
+
+
+def test_evaluate_cli_froc_threshold_range(tmp_path: Path) -> None:
+    run_dir = _seed_run_dir(tmp_path)
+    _seed_froc_case(run_dir)
+
+    rc = evaluate_cli.main([
+        str(run_dir), "--visualize-only", "none",
+        "--froc", "--froc-threshold-range", "0.4", "0.8", "0.2",
+    ])
+
+    assert rc == 0
+    with (run_dir / "diagnostic" / "evaluation" / "froc.csv").open() as f:
+        thresholds = [r["threshold"] for r in csv.DictReader(f)]
+    # start=0.4, stop=0.8 inclusive, step=0.2 -> 0.4, 0.6, 0.8
+    assert thresholds == ["0.4", "0.6", "0.8"]

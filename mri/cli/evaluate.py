@@ -28,6 +28,8 @@ from mri.diagnostics.detection import (
     LesionRow, CaseRow, evaluate_case,
     write_lesion_csv, write_case_csv, build_summary, write_summary_json,
     label_lesion_components,
+    FrocCaseInput, compute_froc_curve, select_operating_point,
+    sensitivity_at_fp_rates, write_froc_csv, build_operating_point_summary,
 )
 from mri.diagnostics.visualization import (
     build_case_figure, write_case_html, write_index_html,
@@ -43,6 +45,119 @@ def _load_case(predictions_dir: Path, postprocessed_dir: Path, case_id: str):
     pred = np.load(postprocessed_dir / case_id / "lesion_mask.npz")
     meta = json.loads((predictions_dir / case_id / "meta.json").read_text())
     return gt["lesion"], pred["mask"], int(meta.get("class_label", 0))
+
+
+def _build_froc_thresholds(
+    explicit: Sequence[float] | None,
+    range_: Sequence[float] | None,
+) -> list[float]:
+    """Resolve the threshold sweep from the CLI flags.
+
+    Priority: explicit list > START STOP STEP range > default 0.1..0.9 step 0.1.
+    STOP is inclusive; values are rounded to avoid float drift in filenames/CSV.
+    """
+    if explicit:
+        return [round(float(t), 6) for t in explicit]
+    if range_:
+        start, stop, step = range_
+        if step <= 0:
+            raise SystemExit("[evaluate] --froc-threshold-range STEP must be > 0.")
+        n = int(round((stop - start) / step))
+        return [round(start + i * step, 6) for i in range(n + 1)]
+    return [round(0.1 * i, 6) for i in range(1, 10)]
+
+
+def _load_froc_case(predictions_dir: Path, case_id: str) -> FrocCaseInput:
+    prob = np.load(predictions_dir / case_id / "prob.npz")
+    gt = np.load(predictions_dir / case_id / "gt.npz")
+    return FrocCaseInput(
+        case_id=case_id,
+        gt_lesion=gt["lesion"],
+        lesion_prob=prob["lesion"],
+        gland_prob=prob["gland"],
+    )
+
+
+def _write_froc_plot(points, operating_point, path: Path) -> None:
+    """Render the FROC curve (sensitivity vs FP/case) to a PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ordered = sorted(points, key=lambda p: p.fp_per_case)
+    xs = [p.fp_per_case for p in ordered]
+    ys = [p.sensitivity for p in ordered]
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.plot(xs, ys, marker="o", color="#1f77b4")
+    ax.axvline(
+        operating_point.fp_per_case, color="#d62728", linestyle="--",
+        label=(
+            f"operating point\nthr={operating_point.threshold:g}, "
+            f"sens={operating_point.sensitivity:.2f}"
+        ),
+    )
+    ax.set_xlabel("False positives per case")
+    ax.set_ylabel("Sensitivity")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_title("FROC (per-lesion detection)")
+    ax.legend(loc="lower right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=100)
+    plt.close(fig)
+
+
+def _run_froc(
+    *,
+    predictions_dir: Path,
+    eval_dir: Path,
+    case_ids: Sequence[str],
+    thresholds: Sequence[float],
+    target_fp_per_case: float,
+    correctness_iou: float,
+    connectivity: int,
+    gland_threshold: float,
+) -> None:
+    """Sweep the lesion threshold and write froc.csv, operating_point.json, froc.png."""
+    connectivity_rank = _CONNECTIVITY_TO_RANK[connectivity]
+    cases = [
+        _load_froc_case(predictions_dir, case_id)
+        for case_id in case_ids
+        if (predictions_dir / case_id / "prob.npz").exists()
+        and (predictions_dir / case_id / "gt.npz").exists()
+    ]
+    if not cases:
+        warnings.warn(
+            "[evaluate] --froc requested but no case has predictions/prob.npz; "
+            "skipping FROC.",
+            stacklevel=2,
+        )
+        return
+
+    points = compute_froc_curve(
+        cases, thresholds=thresholds,
+        correctness_iou=correctness_iou, connectivity_rank=connectivity_rank,
+        gland_threshold=gland_threshold,
+    )
+    operating_point = select_operating_point(
+        points, target_fp_per_case=target_fp_per_case,
+    )
+    rates = sensitivity_at_fp_rates(points)
+
+    write_froc_csv(points, eval_dir / "froc.csv")
+    summary = build_operating_point_summary(
+        operating_point=operating_point,
+        sensitivity_at_rates=rates,
+        params={
+            "correctness_iou": correctness_iou,
+            "connectivity": connectivity,
+            "gland_threshold": gland_threshold,
+            "thresholds": list(thresholds),
+            "n_cases": len(cases),
+        },
+    )
+    write_summary_json(summary, eval_dir / "operating_point.json")
+    _write_froc_plot(points, operating_point, eval_dir / "froc.png")
 
 
 def _is_failed_case(case_row: CaseRow, case_lesion_rows: list[LesionRow]) -> bool:
@@ -64,6 +179,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--downsample-vis", type=int, default=1)
     parser.add_argument("--plotly-cdn", action="store_true")
+    parser.add_argument(
+        "--froc", action="store_true",
+        help="Sweep the lesion threshold and emit a FROC curve + operating point.",
+    )
+    parser.add_argument(
+        "--froc-thresholds", type=float, nargs="+", default=None,
+        help="Explicit lesion thresholds to sweep (overrides --froc-threshold-range).",
+    )
+    parser.add_argument(
+        "--froc-threshold-range", type=float, nargs=3, default=None,
+        metavar=("START", "STOP", "STEP"),
+        help="Lesion threshold sweep as START STOP STEP (STOP inclusive).",
+    )
+    parser.add_argument(
+        "--froc-target-fp", type=float, default=1.0,
+        help="Target false-positives-per-case budget for the operating point.",
+    )
     args = parser.parse_args(argv)
 
     paths = resolve_run_dir(args.run_dir)
@@ -137,6 +269,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         cases_skipped=cases_skipped,
     )
     write_summary_json(summary, eval_dir / "summary.json")
+
+    if args.froc:
+        thresholds = _build_froc_thresholds(
+            args.froc_thresholds, args.froc_threshold_range,
+        )
+        _run_froc(
+            predictions_dir=predictions_dir,
+            eval_dir=eval_dir,
+            case_ids=case_ids,
+            thresholds=thresholds,
+            target_fp_per_case=args.froc_target_fp,
+            correctness_iou=args.correctness_iou,
+            connectivity=args.connectivity,
+            gland_threshold=gland_threshold_used,
+        )
 
     if args.visualize_only != "none":
         visuals_dir = eval_dir / "visuals"
