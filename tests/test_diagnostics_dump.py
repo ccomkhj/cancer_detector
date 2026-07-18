@@ -198,6 +198,25 @@ def test_dump_threshold_persisted_when_provided(tmp_path: Path) -> None:
     assert meta["gland_threshold"] == 0.5
 
 
+def test_dump_persists_voxel_spacing_when_provided(tmp_path: Path) -> None:
+    out_dir = tmp_path / "predictions"
+    model = _StubModel()
+    loader = _stub_dataloader(num_cases=2, slices_per_case=2)
+
+    dump_predictions(
+        model=model, dataloader=loader, device=torch.device("cpu"),
+        output_dir=out_dir,
+        num_slices_per_case={"case_00": 2, "case_01": 2},
+        voxel_spacing_by_case={"case_00": [3.0, 0.5, 0.5]},  # only case_00 has it
+    )
+
+    meta_00 = json.loads((out_dir / "case_00" / "meta.json").read_text())
+    assert meta_00["voxel_spacing_mm"] == [3.0, 0.5, 0.5]
+    # A case without an entry simply omits the field.
+    meta_01 = json.loads((out_dir / "case_01" / "meta.json").read_text())
+    assert "voxel_spacing_mm" not in meta_01
+
+
 def test_dump_isolates_inference_failure(tmp_path: Path) -> None:
     out_dir = tmp_path / "predictions"
 
