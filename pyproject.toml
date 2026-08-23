@@ -32,6 +32,7 @@ dependencies = [
     "optuna>=3.4.0",
     "gradio>=4.0.0",
     "pyyaml>=6.0",
+    "picai-eval>=1.4.13",
 ]
 
 [dependency-groups]
