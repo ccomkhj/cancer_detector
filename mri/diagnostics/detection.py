@@ -15,6 +15,8 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 from scipy import ndimage
 
+from mri.diagnostics.postprocess import apply_postprocess
+
 
 def label_lesion_components(
     gt_lesion: np.ndarray,
@@ -284,3 +286,272 @@ def build_summary(
 
 def write_summary_json(summary: Mapping[str, Any], path: Path) -> None:
     Path(path).write_text(_json.dumps(summary, indent=2))
+
+
+# --------------------------------------------------------------------------- #
+# FROC curve + operating-point selection (shortlist #3)
+#
+# The fixed-threshold metrics above only measure recall of ground-truth
+# lesions. FROC additionally counts *false-positive predicted lesions*: a
+# predicted connected component that meets no ground-truth lesion above the
+# correctness IoU. This mirrors the detection rule with the roles of
+# prediction and ground truth swapped, and is the one new detection concept
+# these functions introduce. All pure NumPy/scipy; the CLI does the I/O.
+# --------------------------------------------------------------------------- #
+
+
+def _component_max_ious(
+    labels: np.ndarray, n_components: int, other: np.ndarray,
+) -> list[float]:
+    """Max per-slice IoU of each labelled component against ``other``.
+
+    The single traversal shared by detection and false-positive counting, so
+    the correctness-IoU rule is applied identically on both sides.
+    """
+    other_bool = other.astype(bool)
+    return [
+        compute_lesion_iou((labels == k), other_bool).max_slice_iou
+        for k in range(1, n_components + 1)
+    ]
+
+
+def count_false_positive_components(
+    pred_lesion: np.ndarray,
+    gt_lesion: np.ndarray,
+    *,
+    correctness_iou: float,
+    connectivity_rank: int,
+) -> int:
+    """Count predicted lesion components that meet no ground-truth lesion.
+
+    A predicted connected component is a false positive when its maximum
+    per-slice IoU against the *entire* GT lesion volume does not exceed
+    ``correctness_iou`` -- the detection rule of :func:`compute_lesion_iou`
+    with prediction and ground truth swapped.
+
+    Args:
+      pred_lesion: (Z, H, W) predicted (already postprocessed) lesion voxels.
+      gt_lesion:   (Z, H, W) ground-truth lesion voxels.
+      correctness_iou: minimum max-slice IoU for a predicted component to
+          count as meeting a GT lesion (strictly greater than).
+      connectivity_rank: component connectivity, as in
+          :func:`label_lesion_components`.
+    """
+    assert pred_lesion.shape == gt_lesion.shape, (
+        f"shape mismatch: pred {pred_lesion.shape} vs gt {gt_lesion.shape}"
+    )
+    labels, n = label_lesion_components(
+        pred_lesion, connectivity_rank=connectivity_rank,
+    )
+    ious = _component_max_ious(labels, n, gt_lesion)
+    return sum(1 for iou in ious if iou <= correctness_iou)
+
+
+@dataclass(frozen=True)
+class CaseDetectionCounts:
+    """Per-case detection counts at a single lesion threshold."""
+    n_gt_lesions: int
+    n_detected: int
+    n_false_positives: int
+
+
+def count_case_detections(
+    *,
+    gt_lesion: np.ndarray,
+    pred_lesion: np.ndarray,
+    correctness_iou: float,
+    connectivity_rank: int,
+) -> CaseDetectionCounts:
+    """Count detected GT lesions and false-positive predicted components.
+
+    A GT lesion component is *detected* when its max per-slice IoU against the
+    full predicted lesion exceeds ``correctness_iou`` (the same rule
+    :func:`evaluate_case` uses). Detection and false positives are scored with
+    the same connectivity and correctness IoU so a "lesion" means the same
+    thing on both sides.
+    """
+    assert gt_lesion.shape == pred_lesion.shape, (
+        f"shape mismatch: gt {gt_lesion.shape} vs pred {pred_lesion.shape}"
+    )
+    labels, n_gt = label_lesion_components(
+        gt_lesion, connectivity_rank=connectivity_rank,
+    )
+    gt_ious = _component_max_ious(labels, n_gt, pred_lesion)
+    detected = sum(1 for iou in gt_ious if iou > correctness_iou)
+    n_fp = count_false_positive_components(
+        pred_lesion, gt_lesion,
+        correctness_iou=correctness_iou, connectivity_rank=connectivity_rank,
+    )
+    return CaseDetectionCounts(
+        n_gt_lesions=n_gt, n_detected=detected, n_false_positives=n_fp,
+    )
+
+
+@dataclass(frozen=True)
+class FrocCaseInput:
+    """One case's arrays for the FROC sweep.
+
+    ``lesion_prob`` / ``gland_prob`` are the probability volumes from
+    ``diagnostic/predictions/<case>/prob.npz``; ``gt_lesion`` is the
+    ground-truth lesion volume from ``gt.npz``.
+    """
+    case_id: str
+    gt_lesion: np.ndarray
+    lesion_prob: np.ndarray
+    gland_prob: np.ndarray
+
+
+@dataclass(frozen=True)
+class FrocPoint:
+    """One point on the cohort FROC curve (one lesion threshold)."""
+    threshold: float
+    sensitivity: float
+    fp_per_case: float
+    n_gt_lesions: int
+    n_detected: int
+    n_false_positives: int
+    n_cases: int
+
+
+def compute_froc_curve(
+    cases: Iterable[FrocCaseInput],
+    *,
+    thresholds: Iterable[float],
+    correctness_iou: float,
+    connectivity_rank: int,
+    gland_threshold: float,
+) -> list[FrocPoint]:
+    """Sweep the lesion threshold and aggregate cohort FROC points.
+
+    For each threshold the lesion probability is binarised and
+    gland-constrained with :func:`apply_postprocess` (so the curve reflects the
+    deployed postprocessing), then scored with :func:`count_case_detections`.
+    Cohort aggregation per threshold:
+
+      - ``sensitivity  = total detected GT lesions / total GT lesions``
+      - ``fp_per_case  = total false positives / number of cases``
+    """
+    cases = list(cases)
+    n_cases = len(cases)
+    points: list[FrocPoint] = []
+    for threshold in thresholds:
+        total_gt = 0
+        total_detected = 0
+        total_fp = 0
+        for case in cases:
+            pred_lesion, _gland_mask, _present = apply_postprocess(
+                case.lesion_prob, case.gland_prob,
+                lesion_threshold=threshold, gland_threshold=gland_threshold,
+            )
+            counts = count_case_detections(
+                gt_lesion=case.gt_lesion, pred_lesion=pred_lesion,
+                correctness_iou=correctness_iou,
+                connectivity_rank=connectivity_rank,
+            )
+            total_gt += counts.n_gt_lesions
+            total_detected += counts.n_detected
+            total_fp += counts.n_false_positives
+        points.append(FrocPoint(
+            threshold=float(threshold),
+            sensitivity=(total_detected / total_gt) if total_gt > 0 else 0.0,
+            fp_per_case=(total_fp / n_cases) if n_cases > 0 else 0.0,
+            n_gt_lesions=total_gt,
+            n_detected=total_detected,
+            n_false_positives=total_fp,
+            n_cases=n_cases,
+        ))
+    return points
+
+
+@dataclass(frozen=True)
+class OperatingPoint:
+    """The lesion threshold selected from a FROC curve."""
+    threshold: float
+    sensitivity: float
+    fp_per_case: float
+    target_fp_per_case: float
+    target_met: bool
+
+
+def select_operating_point(
+    points: Iterable[FrocPoint],
+    *,
+    target_fp_per_case: float,
+) -> OperatingPoint:
+    """Pick the threshold maximising sensitivity within an FP/case budget.
+
+    Among points at or below ``target_fp_per_case``, choose the one with the
+    highest sensitivity; ties are broken toward the fewest false positives,
+    then the highest threshold (least over-detection for the same
+    sensitivity). If no point meets the budget, fall back to the point with
+    the fewest false positives and mark ``target_met=False``.
+    """
+    points = list(points)
+    if not points:
+        raise ValueError("cannot select an operating point from an empty FROC curve")
+
+    within = [p for p in points if p.fp_per_case <= target_fp_per_case]
+    if within:
+        best = max(within, key=lambda p: (p.sensitivity, -p.fp_per_case, p.threshold))
+        target_met = True
+    else:
+        best = min(points, key=lambda p: (p.fp_per_case, -p.sensitivity, -p.threshold))
+        target_met = False
+
+    return OperatingPoint(
+        threshold=best.threshold,
+        sensitivity=best.sensitivity,
+        fp_per_case=best.fp_per_case,
+        target_fp_per_case=float(target_fp_per_case),
+        target_met=target_met,
+    )
+
+
+def sensitivity_at_fp_rates(
+    points: Iterable[FrocPoint],
+    *,
+    fp_rates: Iterable[float] = (0.5, 1.0, 2.0, 4.0),
+) -> list[tuple[float, float]]:
+    """Max sensitivity achievable at or below each standard FP/case rate."""
+    points = list(points)
+    out: list[tuple[float, float]] = []
+    for rate in fp_rates:
+        within = [p.sensitivity for p in points if p.fp_per_case <= rate]
+        out.append((float(rate), max(within) if within else 0.0))
+    return out
+
+
+def write_froc_csv(points: Iterable[FrocPoint], path: Path) -> None:
+    """Write froc.csv. Empty list => header-only file."""
+    fieldnames = [
+        "threshold", "sensitivity", "fp_per_case",
+        "n_gt_lesions", "n_detected", "n_false_positives", "n_cases",
+    ]
+    with Path(path).open("w", newline="") as f:
+        writer = _csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for point in points:
+            writer.writerow(asdict(point))
+
+
+def build_operating_point_summary(
+    *,
+    operating_point: OperatingPoint,
+    sensitivity_at_rates: Iterable[tuple[float, float]],
+    params: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Assemble the operating_point.json payload (stable schema)."""
+    return {
+        "operating_point": {
+            "threshold": operating_point.threshold,
+            "sensitivity": operating_point.sensitivity,
+            "fp_per_case": operating_point.fp_per_case,
+            "target_fp_per_case": operating_point.target_fp_per_case,
+            "target_met": operating_point.target_met,
+        },
+        "sensitivity_at_fp_rates": [
+            {"fp_per_case": rate, "sensitivity": sensitivity}
+            for rate, sensitivity in sensitivity_at_rates
+        ],
+        "params": dict(params),
+    }

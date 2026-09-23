@@ -1,0 +1,273 @@
+#!/bin/bash
+#SBATCH --job-name=mri-report
+#SBATCH --output=slurm-%j.out
+#SBATCH --error=slurm-%j.err
+#SBATCH --time=02:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --partition=gpus
+#SBATCH --account=ebrains-0000006
+
+# ============================================================================
+# HPC structured findings report launcher with Singularity/Apptainer handoff
+# ============================================================================
+# CPU-only: report generation (findings + HTML/PDF) needs no GPU, so this wrapper
+# requests no --gres=gpu and runs the container without --nv. It reuses the
+# cluster's `gpus` partition/account (the only one known to work here) but
+# reserves no GPU; on a cluster with a dedicated CPU partition, change the
+# `#SBATCH --partition=` line above to it.
+#
+# Works in both modes:
+#   1) Direct run: bash scripts/new/report <run_dir> [args...]
+#   2) SLURM run:  sbatch scripts/new/report <run_dir> [args...]
+#
+# All arguments are passed straight through to `python -m mri.cli.report`.
+#
+# Examples:
+#   bash scripts/new/report runs/seg_2026
+#   bash scripts/new/report runs/seg_2026 --case case_0123
+#   bash scripts/new/report runs/seg_2026 --suspicion-thresholds 0.3 0.7
+#   sbatch scripts/new/report runs/seg_2026
+#   bash scripts/new/report --dry-run runs/seg_2026
+# ============================================================================
+
+set -euo pipefail
+
+if [[ -z "${BASH_VERSION:-}" ]]; then
+    exec bash "$0" "$@"
+fi
+
+is_project_dir() {
+    local candidate="${1:-}"
+    [[ -n "${candidate}" && -d "${candidate}" && -f "${candidate}/mri/cli/report.py" && -f "${candidate}/scripts/new/report" ]]
+}
+
+resolve_slurm_command_path() {
+    local job_line command_path
+
+    if [[ -z "${SLURM_JOB_ID:-}" ]] || ! command -v scontrol &> /dev/null; then
+        return 1
+    fi
+
+    job_line="$(scontrol show job -o "${SLURM_JOB_ID}" 2> /dev/null || true)"
+    if [[ -z "${job_line}" ]]; then
+        return 1
+    fi
+
+    command_path="$(
+        awk '
+            {
+                for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^Command=/) {
+                        sub(/^Command=/, "", $i)
+                        print $i
+                        exit
+                    }
+                }
+            }
+        ' <<< "${job_line}"
+    )"
+
+    if [[ -z "${command_path}" ]]; then
+        return 1
+    fi
+
+    if [[ "${command_path}" != /* && -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+        command_path="${SLURM_SUBMIT_DIR}/${command_path}"
+    fi
+
+    echo "${command_path}"
+}
+
+resolve_project_dir() {
+    local candidate script_dir command_path
+
+    if [[ -n "${MRI_REPORT_PROJECT_DIR:-}" ]]; then
+        candidate="$(cd "${MRI_REPORT_PROJECT_DIR}" 2> /dev/null && pwd || true)"
+        if is_project_dir "${candidate}"; then
+            echo "${candidate}"
+            return 0
+        fi
+        echo "ERROR: MRI_REPORT_PROJECT_DIR is not a valid project root: ${MRI_REPORT_PROJECT_DIR}" >&2
+        return 1
+    fi
+
+    if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+        command_path="$(resolve_slurm_command_path || true)"
+        if [[ -n "${command_path}" ]]; then
+            candidate="$(cd "$(dirname "${command_path}")/../.." 2> /dev/null && pwd || true)"
+            if is_project_dir "${candidate}"; then
+                echo "${candidate}"
+                return 0
+            fi
+        fi
+
+        if is_project_dir "${SLURM_SUBMIT_DIR:-}"; then
+            candidate="$(cd "${SLURM_SUBMIT_DIR}" && pwd)"
+            echo "${candidate}"
+            return 0
+        fi
+    fi
+
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    candidate="$(cd "${script_dir}/../.." && pwd)"
+    if is_project_dir "${candidate}"; then
+        echo "${candidate}"
+        return 0
+    fi
+
+    echo "ERROR: Could not resolve the project directory for scripts/new/report." >&2
+    echo "Set MRI_REPORT_PROJECT_DIR to the repository root if you are launching via SLURM from outside the repo." >&2
+    return 1
+}
+
+resolve_container_runtime() {
+    if command -v singularity &> /dev/null; then
+        echo "singularity"
+        return 0
+    fi
+    if command -v apptainer &> /dev/null; then
+        echo "apptainer"
+        return 0
+    fi
+    return 1
+}
+
+resolve_container_image() {
+    local project_parent image_dir candidate
+
+    project_parent="$(dirname "${PROJECT_DIR}")"
+    image_dir="${project_parent}/singularity_images"
+
+    for candidate in \
+        "${MRI_REPORT_CONTAINER_IMAGE:-}" \
+        "${MRI_TRAIN_CONTAINER_IMAGE:-}" \
+        "${image_dir}/mri-train3.sif" \
+        "${image_dir}/mri-train2.sif" \
+        "${image_dir}/mri-train.sif"
+    do
+        if [[ -n "${candidate}" && -f "${candidate}" ]]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+PROJECT_DIR="$(resolve_project_dir)"
+
+cd "${PROJECT_DIR}" || {
+    echo "ERROR: Cannot change to project directory: ${PROJECT_DIR}"
+    exit 1
+}
+
+if [[ -f "${PROJECT_DIR}/.env" ]]; then
+    set -a
+    source "${PROJECT_DIR}/.env"
+    set +a
+fi
+
+MRI_REPORT_USE_CONTAINER="${MRI_REPORT_USE_CONTAINER:-${MRI_TRAIN_USE_CONTAINER:-auto}}"
+if [[ -z "${MRI_REPORT_IN_CONTAINER:-}" && "${MRI_REPORT_USE_CONTAINER}" != "never" ]]; then
+    CONTAINER_RUNTIME="$(resolve_container_runtime || true)"
+    CONTAINER_IMAGE="$(resolve_container_image || true)"
+
+    if [[ -n "${CONTAINER_RUNTIME}" && -n "${CONTAINER_IMAGE}" ]]; then
+        BIND_ROOT="${MRI_REPORT_BIND_ROOT:-${MRI_TRAIN_BIND_ROOT:-$(dirname "${PROJECT_DIR}")}}"
+        export MRI_REPORT_IN_CONTAINER=1
+
+        echo "============================================================================"
+        echo "MRI Report (Singularity HPC, CPU-only)"
+        echo "Project:    ${PROJECT_DIR}"
+        echo "Runtime:    ${CONTAINER_RUNTIME}"
+        echo "Image:      ${CONTAINER_IMAGE}"
+        echo "Bind root:  ${BIND_ROOT}"
+        echo "SLURM Job:  ${SLURM_JOB_ID:-local}"
+        echo "============================================================================"
+
+        exec "${CONTAINER_RUNTIME}" exec \
+            -B "${BIND_ROOT}:${BIND_ROOT}" \
+            --pwd "${PROJECT_DIR}" \
+            "${CONTAINER_IMAGE}" \
+            bash "${PROJECT_DIR}/scripts/new/report" "$@"
+    fi
+
+    if [[ "${MRI_REPORT_USE_CONTAINER}" == "always" ]]; then
+        echo "ERROR: Container mode requested but no Singularity/Apptainer runtime or image was found."
+        echo "Set MRI_REPORT_CONTAINER_IMAGE or place mri-train3.sif under $(dirname "${PROJECT_DIR}")/singularity_images."
+        exit 1
+    fi
+fi
+
+PYTHON_BIN="${PYTHON_BIN:-python}"
+DATA_DIR="${DATA_DIR:-${PROJECT_DIR}/data}"
+PRETRAINED_CACHE_DIR="${PRETRAINED_CACHE_DIR:-${PROJECT_DIR}/pretrained_model}"
+MPLCONFIGDIR="${MPLCONFIGDIR:-${PROJECT_DIR}/.cache/matplotlib}"
+
+mkdir -p "${PRETRAINED_CACHE_DIR}/torch" "${PRETRAINED_CACHE_DIR}/huggingface" "${MPLCONFIGDIR}"
+
+export DATA_DIR
+export TORCH_HOME="${TORCH_HOME:-${PRETRAINED_CACHE_DIR}/torch}"
+export HF_HOME="${HF_HOME:-${PRETRAINED_CACHE_DIR}/huggingface}"
+export MPLCONFIGDIR
+export PYTHONPATH="${PROJECT_DIR}:${PYTHONPATH:-}"
+
+DRY_RUN=0
+PASS_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        *)
+            PASS_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+PYTHON_CMD=("${PYTHON_BIN}" "-m" "mri.cli.report" "${PASS_ARGS[@]}")
+
+# Optional explicit-image path (mirrors the other launchers).
+SIF_IMAGE="${SIF_IMAGE:-}"
+SIF_EXTRA_BINDS="${SIF_EXTRA_BINDS:-}"
+
+if [[ -n "${SIF_IMAGE}" ]]; then
+    if [[ ! -f "${SIF_IMAGE}" ]]; then
+        echo "ERROR: SIF_IMAGE not found: ${SIF_IMAGE}"
+        exit 1
+    fi
+    BIND_PATHS="${PROJECT_DIR}:${PROJECT_DIR}"
+    [[ "${DATA_DIR}" != "${PROJECT_DIR}"* ]] && BIND_PATHS+=",${DATA_DIR}:${DATA_DIR}"
+    [[ -n "${SIF_EXTRA_BINDS}" ]] && BIND_PATHS+=",${SIF_EXTRA_BINDS}"
+    CMD=(singularity exec --bind "${BIND_PATHS}" --pwd "${PROJECT_DIR}" "${SIF_IMAGE}" "${PYTHON_CMD[@]}")
+else
+    CMD=("${PYTHON_CMD[@]}")
+fi
+
+echo "============================================================================"
+echo "MRI Report (CPU-only)"
+echo "Project:    ${PROJECT_DIR}"
+echo "Python:     ${PYTHON_BIN}"
+echo "Data dir:   ${DATA_DIR}"
+echo "MPL config: ${MPLCONFIGDIR}"
+echo "SIF image:  ${SIF_IMAGE:-<native>}"
+echo "SLURM Job:  ${SLURM_JOB_ID:-local}"
+echo "Command:    ${CMD[*]}"
+echo "============================================================================"
+
+if [[ ${DRY_RUN} -eq 1 ]]; then
+    echo "DRY RUN: command not executed."
+    exit 0
+fi
+
+if command -v srun &> /dev/null && [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    srun "${CMD[@]}"
+else
+    "${CMD[@]}"
+fi

@@ -40,6 +40,7 @@ def dump_predictions(
     force: bool = False,
     lesion_threshold: float | None = None,
     gland_threshold: float | None = None,
+    voxel_spacing_by_case: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Run inference and write per-case artifacts under ``output_dir/<case_id>/``.
 
@@ -55,6 +56,10 @@ def dump_predictions(
       force: when True, ignore any pre-existing ``prob.npz`` and re-dump.
       lesion_threshold, gland_threshold: when provided, persisted into each
         case's ``meta.json`` so downstream consumers know the operating point.
+      voxel_spacing_by_case: optional mapping case_id -> (z, y, x) spacing in
+        mm; when a case has an entry it is persisted as ``voxel_spacing_mm``
+        in that case's ``meta.json`` so the report / DICOM-SR can render real
+        millimetre sizes. Absent cases simply omit the field.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -172,6 +177,9 @@ def dump_predictions(
             "lesion_threshold": lesion_threshold,
             "gland_threshold": gland_threshold,
         }
+        spacing = (voxel_spacing_by_case or {}).get(case_id)
+        if spacing is not None:
+            meta_doc["voxel_spacing_mm"] = list(spacing)
         (case_dir / "meta.json").write_text(json.dumps(meta_doc, indent=2))
         cases_written += 1
 

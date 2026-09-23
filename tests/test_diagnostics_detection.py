@@ -327,3 +327,226 @@ def test_write_summary_json_round_trip(tmp_path: Path) -> None:
 
     loaded = json.loads(out.read_text())
     assert loaded == summary
+
+
+# --------------------------------------------------------------------------- #
+# FROC curve + operating-point selection (shortlist #3)
+# --------------------------------------------------------------------------- #
+
+from mri.diagnostics.detection import (
+    count_false_positive_components,
+    count_case_detections,
+    CaseDetectionCounts,
+    FrocCaseInput,
+    FrocPoint,
+    compute_froc_curve,
+    select_operating_point,
+    sensitivity_at_fp_rates,
+    write_froc_csv,
+    build_operating_point_summary,
+)
+
+
+def _block(z: int, r0: int, c0: int, *, shape: tuple[int, int, int]) -> np.ndarray:
+    """A (Z,H,W) uint8 volume with a 2x2 block set on slice ``z``."""
+    vol = np.zeros(shape, dtype=np.uint8)
+    vol[z, r0:r0 + 2, c0:c0 + 2] = 1
+    return vol
+
+
+def test_false_positive_component_overlapping_gt_is_not_counted() -> None:
+    shape = (3, 8, 8)
+    gt = _block(0, 0, 0, shape=shape)
+    pred = _block(0, 0, 0, shape=shape)  # exact overlap
+
+    fp = count_false_positive_components(
+        pred, gt, correctness_iou=0.1, connectivity_rank=1,
+    )
+
+    assert fp == 0
+
+
+def test_predicted_component_meeting_no_gt_is_a_false_positive() -> None:
+    shape = (3, 8, 8)
+    gt = _block(0, 0, 0, shape=shape)
+    pred = _block(0, 5, 5, shape=shape)  # disjoint from GT
+
+    fp = count_false_positive_components(
+        pred, gt, correctness_iou=0.1, connectivity_rank=1,
+    )
+
+    assert fp == 1
+
+
+def test_false_positive_count_mixes_hits_and_misses() -> None:
+    shape = (3, 8, 8)
+    gt = _block(0, 0, 0, shape=shape)
+    pred = _block(0, 0, 0, shape=shape) | _block(2, 5, 5, shape=shape)
+
+    fp = count_false_positive_components(
+        pred, gt, correctness_iou=0.1, connectivity_rank=1,
+    )
+
+    assert fp == 1  # the slice-2 component meets no GT
+
+
+def test_empty_prediction_has_no_false_positives() -> None:
+    shape = (3, 8, 8)
+    gt = _block(0, 0, 0, shape=shape)
+    pred = np.zeros(shape, dtype=np.uint8)
+
+    assert count_false_positive_components(
+        pred, gt, correctness_iou=0.1, connectivity_rank=1,
+    ) == 0
+
+
+def test_count_case_detections_reports_gt_detected_and_fp() -> None:
+    shape = (3, 8, 8)
+    gt = _block(0, 0, 0, shape=shape) | _block(2, 0, 0, shape=shape)  # 2 GT lesions
+    pred = _block(0, 0, 0, shape=shape) | _block(1, 5, 0, shape=shape)  # 1 hit + 1 FP
+
+    counts = count_case_detections(
+        gt_lesion=gt, pred_lesion=pred,
+        correctness_iou=0.1, connectivity_rank=1,
+    )
+
+    assert counts == CaseDetectionCounts(
+        n_gt_lesions=2, n_detected=1, n_false_positives=1,
+    )
+
+
+def _froc_cohort() -> list[FrocCaseInput]:
+    """One case with 2 GT lesions and probability-graded FP/detection regions.
+
+    Layout (Z=3, H=8, W=8), gland present everywhere:
+      - GT1 + prob 0.90 at slice 0, rows/cols 0:2  -> detected once t <= 0.90
+      - FP  B  prob 0.70 at slice 0, rows/cols 5:7  -> FP once t <= 0.70
+      - FP  C  prob 0.55 at slice 1, rows 5:7 c 0:2 -> FP once t <= 0.55
+      - GT2 + prob 0.45 at slice 2, rows/cols 0:2  -> detected once t <= 0.45
+    """
+    shape = (3, 8, 8)
+    lesion_prob = np.zeros(shape, dtype=np.float32)
+    lesion_prob[0, 0:2, 0:2] = 0.90
+    lesion_prob[0, 5:7, 5:7] = 0.70
+    lesion_prob[1, 5:7, 0:2] = 0.55
+    lesion_prob[2, 0:2, 0:2] = 0.45
+    gland_prob = np.ones(shape, dtype=np.float32)
+    gt = _block(0, 0, 0, shape=shape) | _block(2, 0, 0, shape=shape)
+    return [FrocCaseInput(
+        case_id="c1", gt_lesion=gt, lesion_prob=lesion_prob, gland_prob=gland_prob,
+    )]
+
+
+def test_compute_froc_curve_values_and_monotonicity() -> None:
+    cases = _froc_cohort()
+    thresholds = [0.8, 0.6, 0.5, 0.4]
+
+    points = compute_froc_curve(
+        cases, thresholds=thresholds,
+        correctness_iou=0.1, connectivity_rank=1, gland_threshold=0.5,
+    )
+
+    by_t = {p.threshold: p for p in points}
+    assert (by_t[0.8].sensitivity, by_t[0.8].fp_per_case) == (0.5, 0.0)
+    assert (by_t[0.6].sensitivity, by_t[0.6].fp_per_case) == (0.5, 1.0)
+    assert (by_t[0.5].sensitivity, by_t[0.5].fp_per_case) == (0.5, 2.0)
+    assert (by_t[0.4].sensitivity, by_t[0.4].fp_per_case) == (1.0, 2.0)
+
+    # Monotonic: lowering the threshold never lowers sensitivity or FP/case.
+    ordered = [by_t[t] for t in thresholds]  # thresholds descending
+    for hi, lo in zip(ordered, ordered[1:]):
+        assert lo.sensitivity >= hi.sensitivity
+        assert lo.fp_per_case >= hi.fp_per_case
+
+
+def test_compute_froc_curve_respects_gland_constraint() -> None:
+    cases = _froc_cohort()
+    # Zero out the gland everywhere -> postprocess zeroes every lesion mask.
+    cases = [FrocCaseInput(
+        case_id=c.case_id, gt_lesion=c.gt_lesion,
+        lesion_prob=c.lesion_prob, gland_prob=np.zeros_like(c.gland_prob),
+    ) for c in cases]
+
+    points = compute_froc_curve(
+        cases, thresholds=[0.4], correctness_iou=0.1,
+        connectivity_rank=1, gland_threshold=0.5,
+    )
+
+    assert points[0].sensitivity == 0.0
+    assert points[0].fp_per_case == 0.0
+
+
+def _froc_points() -> list[FrocPoint]:
+    return [
+        FrocPoint(threshold=0.8, sensitivity=0.5, fp_per_case=0.0,
+                  n_gt_lesions=2, n_detected=1, n_false_positives=0, n_cases=1),
+        FrocPoint(threshold=0.6, sensitivity=0.5, fp_per_case=1.0,
+                  n_gt_lesions=2, n_detected=1, n_false_positives=1, n_cases=1),
+        FrocPoint(threshold=0.5, sensitivity=0.5, fp_per_case=2.0,
+                  n_gt_lesions=2, n_detected=1, n_false_positives=2, n_cases=1),
+        FrocPoint(threshold=0.4, sensitivity=1.0, fp_per_case=2.0,
+                  n_gt_lesions=2, n_detected=2, n_false_positives=2, n_cases=1),
+    ]
+
+
+def test_operating_point_picks_max_sensitivity_within_budget() -> None:
+    op = select_operating_point(_froc_points(), target_fp_per_case=2.0)
+
+    assert op.threshold == 0.4
+    assert op.sensitivity == 1.0
+    assert op.fp_per_case == 2.0
+    assert op.target_met is True
+
+
+def test_operating_point_ties_prefer_fewest_false_positives() -> None:
+    # Budget 1.0: thresholds 0.8 and 0.6 both reach sensitivity 0.5; 0.8 has 0 FP.
+    op = select_operating_point(_froc_points(), target_fp_per_case=1.0)
+
+    assert op.threshold == 0.8
+    assert op.fp_per_case == 0.0
+    assert op.target_met is True
+
+
+def test_operating_point_marks_target_not_met() -> None:
+    op = select_operating_point(_froc_points(), target_fp_per_case=-1.0)
+
+    assert op.target_met is False
+    assert op.threshold == 0.8  # fewest FPs is the best we can do
+
+
+def test_sensitivity_at_standard_fp_rates() -> None:
+    rates = sensitivity_at_fp_rates(_froc_points(), fp_rates=(0.5, 1.0, 2.0, 4.0))
+
+    assert rates == [(0.5, 0.5), (1.0, 0.5), (2.0, 1.0), (4.0, 1.0)]
+
+
+def test_write_froc_csv_columns_and_values(tmp_path: Path) -> None:
+    out = tmp_path / "froc.csv"
+
+    write_froc_csv(_froc_points(), out)
+
+    with out.open() as f:
+        rows = list(csv.DictReader(f))
+    assert list(rows[0].keys()) == [
+        "threshold", "sensitivity", "fp_per_case",
+        "n_gt_lesions", "n_detected", "n_false_positives", "n_cases",
+    ]
+    assert rows[0]["threshold"] == "0.8"
+    assert rows[3]["sensitivity"] == "1.0"
+
+
+def test_build_operating_point_summary_shape() -> None:
+    op = select_operating_point(_froc_points(), target_fp_per_case=2.0)
+    rates = sensitivity_at_fp_rates(_froc_points())
+
+    summary = build_operating_point_summary(
+        operating_point=op, sensitivity_at_rates=rates,
+        params={"correctness_iou": 0.1, "connectivity": 6},
+    )
+
+    assert summary["operating_point"]["threshold"] == 0.4
+    assert summary["operating_point"]["target_met"] is True
+    assert summary["sensitivity_at_fp_rates"][0] == {
+        "fp_per_case": 0.5, "sensitivity": 0.5,
+    }
+    assert summary["params"]["connectivity"] == 6
